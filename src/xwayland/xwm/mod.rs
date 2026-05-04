@@ -812,6 +812,14 @@ impl X11Wm {
         )?;
         conn.set_selection_owner(win, atoms.WM_S0, x11rb::CURRENT_TIME)?;
         conn.set_selection_owner(win, atoms._NET_WM_CM_S0, x11rb::CURRENT_TIME)?;
+
+        // Register as the system tray host so Wine/explorer.exe sends REQUEST_DOCK
+        // messages to us, allowing us to identify and exclude tray icon windows
+        // from focus candidates (mirrors gamescope's register_systray()).
+        let net_system_tray_s0 = conn.intern_atom(false, b"_NET_SYSTEM_TRAY_S0")?.reply()?.atom;
+        conn.set_selection_owner(win, net_system_tray_s0, x11rb::CURRENT_TIME)?.check()?;
+        tracing::debug!("X11WM: acquired _NET_SYSTEM_TRAY_S0 selection");
+
         conn.composite_redirect_subwindows(screen.root, Redirect::MANUAL)?;
 
         // Set some EWMH properties
