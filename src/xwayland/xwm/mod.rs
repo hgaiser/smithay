@@ -365,6 +365,21 @@ pub trait XwmHandler {
     /// The window will be holding a grab on the mouse button provided.
     fn move_request(&mut self, xwm: XwmId, window: X11Surface, button: u32);
 
+    /// An unhandled X11 client message was received.
+    ///
+    /// Called for `ClientMessage` events that smithay does not handle internally.
+    /// The `type_name` is the atom name string (e.g. `"_NET_ACTIVE_WINDOW"`),
+    /// `window` is the target window id, and `data` contains the first 5 u32 values.
+    fn client_message_event(
+        &mut self,
+        xwm: XwmId,
+        type_name: &str,
+        window: u32,
+        data: [u32; 5],
+    ) {
+        let _ = (xwm, type_name, window, data);
+    }
+
     /// Window requests access to the given selection.
     fn allow_selection_access(&mut self, xwm: XwmId, selection: SelectionTarget) -> bool {
         let _ = (xwm, selection);
@@ -2432,7 +2447,16 @@ where
                     debug!(
                         "Unhandled client msg of type {:?}",
                         String::from_utf8(conn.get_atom_name(x)?.reply_unchecked()?.unwrap().name).ok()
-                    )
+                    );
+                    let type_name = conn
+                        .get_atom_name(x)?
+                        .reply_unchecked()?
+                        .map(|r| String::from_utf8(r.name).unwrap_or_default())
+                        .unwrap_or_default();
+                    let data32 = msg.data.as_data32();
+                    let data = [data32[0], data32[1], data32[2], data32[3], data32[4]];
+                    drop(_guard);
+                    state.client_message_event(xwm_id, &type_name, msg.window, data);
                 }
             }
         }
