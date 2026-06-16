@@ -495,6 +495,21 @@ pub trait XwmHandler {
     /// The window will be holding a grab on the mouse button provided.
     fn move_request(&mut self, xwm: XwmId, window: X11Surface, button: u32);
 
+    /// An unhandled X11 client message was received.
+    ///
+    /// Called for `ClientMessage` events that smithay does not handle internally.
+    /// The `type_name` is the atom name string (e.g. `"_NET_ACTIVE_WINDOW"`),
+    /// `window` is the target window id, and `data` contains the first 5 u32 values.
+    fn client_message_event(
+        &mut self,
+        xwm: XwmId,
+        type_name: &str,
+        window: u32,
+        data: [u32; 5],
+    ) {
+        let _ = (xwm, type_name, window, data);
+    }
+
     /// Window requests to be set as active window.
     ///
     /// A client may include a `currently_active_window` in the request to
@@ -884,6 +899,14 @@ impl X11Wm {
         )?;
         conn.set_selection_owner(win, atoms.WM_S0, x11rb::CURRENT_TIME)?;
         conn.set_selection_owner(win, atoms._NET_WM_CM_S0, x11rb::CURRENT_TIME)?;
+
+        // Register as the system tray host so Wine/explorer.exe sends REQUEST_DOCK
+        // messages to us, allowing us to identify and exclude tray icon windows
+        // from focus candidates (mirrors gamescope's register_systray()).
+        let net_system_tray_s0 = conn.intern_atom(false, b"_NET_SYSTEM_TRAY_S0")?.reply()?.atom;
+        conn.set_selection_owner(win, net_system_tray_s0, x11rb::CURRENT_TIME)?.check()?;
+        tracing::debug!("X11WM: acquired _NET_SYSTEM_TRAY_S0 selection");
+
         conn.composite_redirect_subwindows(screen.root, Redirect::MANUAL)?;
 
         // Set some EWMH properties
@@ -2717,7 +2740,16 @@ where
                     debug!(
                         "Unhandled client msg of type {:?}",
                         String::from_utf8(conn.get_atom_name(x)?.reply_unchecked()?.unwrap().name).ok()
-                    )
+                    );
+                    let type_name = conn
+                        .get_atom_name(x)?
+                        .reply_unchecked()?
+                        .map(|r| String::from_utf8(r.name).unwrap_or_default())
+                        .unwrap_or_default();
+                    let data32 = msg.data.as_data32();
+                    let data = [data32[0], data32[1], data32[2], data32[3], data32[4]];
+                    drop(_guard);
+                    state.client_message_event(xwm_id, &type_name, msg.window, data);
                 }
             }
         }
