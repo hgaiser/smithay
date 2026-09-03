@@ -291,6 +291,9 @@ pub enum WmWindowProperty {
     Pid,
     Opacity,
     FrameExtents,
+    /// An unrecognized atom changed; forwarded so the compositor can react to
+    /// compositor/application-specific properties.
+    Other(Atom),
 }
 
 /// https://x.org/releases/X11R7.6/doc/xorg-docs/specs/ICCCM/icccm.html#input_focus
@@ -1603,7 +1606,7 @@ impl X11Surface {
                 Ok(Some(WmWindowProperty::FrameExtents))
             }
 
-            _ => Ok(None), // unknown
+            _ => Ok(Some(WmWindowProperty::Other(atom))),
         }
     }
 

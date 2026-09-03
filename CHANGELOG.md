@@ -115,6 +115,8 @@ box minus the surface's frame extents.
 
 ### Additions
 
+- Add `WmWindowProperty::Other` to forward unrecognized X11 property changes to the compositor.
+
 - ExtBackgroundEffect protocol is now available in `smithay::wayland::background_effect` module.
 
 `crate::input::dnd` was introduced to enable implementation of Drag&Drop operations on custom types.
