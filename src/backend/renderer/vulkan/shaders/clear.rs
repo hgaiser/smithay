@@ -1,4 +1,4 @@
-use ash::vk::{DescriptorPoolSize, DescriptorSetLayoutBinding, DescriptorType, ShaderStageFlags};
+use ash::vk::{DescriptorSetLayoutBinding, DescriptorType, ShaderStageFlags};
 use bytemuck::NoUninit;
 use include_bytes_aligned::include_bytes_aligned;
 use std::sync::LazyLock;
@@ -13,9 +13,6 @@ pub static CLEAR_BINDINGS: LazyLock<[DescriptorSetLayoutBinding<'static>; 1]> = 
         .stage_flags(ShaderStageFlags::COMPUTE)
         .descriptor_count(1)]
 });
-pub static CLEAR_SIZES: LazyLock<[DescriptorPoolSize; 1]> =
-    LazyLock::new(|| [DescriptorPoolSize::default().ty(DescriptorType::STORAGE_IMAGE)]);
-
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy, NoUninit)]
 pub struct ClearPushConstants {

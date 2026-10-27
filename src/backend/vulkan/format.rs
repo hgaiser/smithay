@@ -171,68 +171,19 @@ vk_format_table! {
 }
 
 #[derive(Debug, Clone)]
+/// A DRM format and modifier combination, with its Vulkan properties.
 pub struct FormatEntry {
+    /// The DRM format and modifier.
     pub format: Format,
+    /// The Vulkan properties of the modifier.
     pub modifier_properties: vk::DrmFormatModifierPropertiesEXT,
 }
 
+/// A list of [`FormatEntry`]s.
 pub type FormatList = Vec<FormatEntry>;
 
-pub fn component_mapping_for_format(format: vk::Format, has_alpha: bool) -> vk::ComponentMapping {
-    match format {
-        vk::Format::B8G8R8_UNORM | vk::Format::B8G8R8A8_UNORM => vk::ComponentMapping {
-            r: vk::ComponentSwizzle::B,
-            g: vk::ComponentSwizzle::IDENTITY,
-            b: vk::ComponentSwizzle::R,
-            a: if has_alpha {
-                vk::ComponentSwizzle::IDENTITY
-            } else {
-                vk::ComponentSwizzle::ONE
-            },
-        },
-        #[cfg(target_endian = "little")]
-        vk::Format::B4G4R4A4_UNORM_PACK16
-        | vk::Format::B5G6R5_UNORM_PACK16
-        | vk::Format::B5G5R5A1_UNORM_PACK16 => vk::ComponentMapping {
-            r: vk::ComponentSwizzle::B,
-            g: vk::ComponentSwizzle::IDENTITY,
-            b: vk::ComponentSwizzle::R,
-            a: if has_alpha {
-                vk::ComponentSwizzle::IDENTITY
-            } else {
-                vk::ComponentSwizzle::ONE
-            },
-        },
-        #[cfg(target_endian = "little")]
-        vk::Format::A1R5G5B5_UNORM_PACK16 | vk::Format::A2R10G10B10_UNORM_PACK32 => vk::ComponentMapping {
-            r: vk::ComponentSwizzle::G,
-            g: vk::ComponentSwizzle::B,
-            b: vk::ComponentSwizzle::A,
-            a: vk::ComponentSwizzle::R,
-        },
-        #[cfg(target_endian = "little")]
-        vk::Format::A1B5G5R5_UNORM_PACK16_KHR
-        | vk::Format::A2B10G10R10_UNORM_PACK32
-        | vk::Format::A8B8G8R8_UNORM_PACK32 => vk::ComponentMapping {
-            r: vk::ComponentSwizzle::A,
-            g: vk::ComponentSwizzle::B,
-            b: vk::ComponentSwizzle::G,
-            a: vk::ComponentSwizzle::R,
-        },
-        _ => vk::ComponentMapping {
-            r: vk::ComponentSwizzle::IDENTITY,
-            g: vk::ComponentSwizzle::IDENTITY,
-            b: vk::ComponentSwizzle::IDENTITY,
-            a: if has_alpha {
-                vk::ComponentSwizzle::IDENTITY
-            } else {
-                vk::ComponentSwizzle::ONE
-            },
-        },
-    }
-}
-
 impl PhysicalDevice {
+    /// Returns all known DRM formats with every modifier that the device supports for them.
     pub fn drm_formats(&self) -> FormatList {
         let mut list = Vec::new();
 

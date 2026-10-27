@@ -276,6 +276,15 @@ impl PhysicalDevice {
         self.device_extensions().any(|name| name == extension)
     }
 
+    /// Returns the properties of the queue families of the physical device, indexed by family.
+    pub fn queue_families(&self) -> Vec<vk::QueueFamilyProperties> {
+        unsafe {
+            self.instance
+                .handle()
+                .get_physical_device_queue_family_properties(self.phd)
+        }
+    }
+
     /// Returns a handle to the underlying [`vk::PhysicalDevice`].
     ///
     /// The handle refers to a specific physical device advertised by the instance. This handle is only valid

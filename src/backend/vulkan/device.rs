@@ -1,15 +1,14 @@
 use crate::backend::{
     renderer::ContextId,
-    vulkan::{format::FormatEntry, image::VulkanImage, PhysicalDevice},
+    vulkan::{PhysicalDevice, format::FormatEntry, image::VulkanImage},
 };
 use ash::{
-    ext, khr,
+    Device as VkDevice, ext, khr,
     vk::{
         self, DeviceCreateInfo, DeviceQueueCreateInfo, PhysicalDeviceExternalMemoryHostPropertiesEXT,
         PhysicalDeviceFeatures2, PhysicalDeviceMemoryProperties, PhysicalDeviceProperties2, Queue,
         QueueFlags,
     },
-    Device as VkDevice,
 };
 use drm::node::DrmNode;
 use std::{
@@ -19,30 +18,52 @@ use std::{
 };
 
 #[derive(Debug, Clone)]
+/// A Vulkan logical device, with its enabled extensions and queue.
+///
+/// Clones share the same device.
 pub struct Device(Arc<InnerDevice>);
 #[derive(Debug, Clone)]
+/// A weak reference to a [`Device`], that does not keep it alive.
 pub struct WeakDevice(Weak<InnerDevice>);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum QueueType {
-    Transfer,
-    Compute,
-    Graphics,
-}
-
-impl QueueType {
-    pub fn vk_flags(&self) -> QueueFlags {
-        match self {
-            QueueType::Transfer => QueueFlags::TRANSFER,
-            QueueType::Compute => QueueFlags::COMPUTE,
-            QueueType::Graphics => QueueFlags::GRAPHICS,
-        }
-    }
+/// Picks a queue family that supports `required` and, if possible, none of `avoid`.
+///
+/// Families that have none of the `avoid` flags are preferred. If there is no such
+/// family, the first family that supports `required` is returned. Graphics and compute
+/// families count as transfer-capable even when they do not advertise
+/// [`QueueFlags::TRANSFER`], as the Vulkan specification allows.
+///
+/// Passing `required = COMPUTE, avoid = GRAPHICS` selects a dedicated (async) compute
+/// family where one exists, so compute work does not share a hardware queue with
+/// graphics work on drivers such as RADV.
+pub fn select_queue_family(
+    families: &[vk::QueueFamilyProperties],
+    required: QueueFlags,
+    avoid: QueueFlags,
+) -> Option<u32> {
+    let supports = |properties: &vk::QueueFamilyProperties| {
+        let flags = if properties
+            .queue_flags
+            .intersects(QueueFlags::GRAPHICS | QueueFlags::COMPUTE)
+        {
+            properties.queue_flags | QueueFlags::TRANSFER
+        } else {
+            properties.queue_flags
+        };
+        properties.queue_count > 0 && flags.contains(required)
+    };
+    families
+        .iter()
+        .position(|properties| supports(properties) && !properties.queue_flags.intersects(avoid))
+        .or_else(|| families.iter().position(supports))
+        .map(|idx| idx as u32)
 }
 
 #[derive(Debug, thiserror::Error)]
+/// Errors that can occur when creating a [`Device`].
 pub enum DeviceError {
     #[error("No matching queue")]
+    /// No usable queue was found.
     NoUsableQueue,
     /// Vulkan API error.
     #[error(transparent)]
@@ -50,39 +71,18 @@ pub enum DeviceError {
 }
 
 impl Device {
+    /// Creates a device on `phd` with `extensions` and `required_features` enabled, using the queue family `queue_index`.
     pub fn new(
         phd: &PhysicalDevice,
         extensions: &[&CStr],
         required_features: &mut PhysicalDeviceFeatures2<'_>,
-        queue_type: QueueType,
-        fallback_to_graphics: bool,
+        queue_index: u32,
     ) -> Result<Self, DeviceError> {
         let extension_pointers = extensions.iter().copied().map(CStr::as_ptr).collect::<Vec<_>>();
-        for ptr in &extension_pointers {
-            println!("{:x} {:?}", (*ptr) as usize, unsafe { CStr::from_ptr(*ptr) });
-        }
 
-        let queue_families = unsafe {
-            phd.instance()
-                .handle()
-                .get_physical_device_queue_family_properties(phd.handle())
-        };
-        let flags = queue_type.vk_flags();
-        let queue_index = queue_families
-            .iter()
-            // Find a queue with a matching type
-            .position(|properties| properties.queue_flags.contains(flags))
-            // Fallback
-            .or_else(|| {
-                if fallback_to_graphics {
-                    queue_families
-                        .iter()
-                        .position(|properties| properties.queue_flags.contains(QueueFlags::GRAPHICS))
-                } else {
-                    None
-                }
-            })
-            .ok_or(DeviceError::NoUsableQueue)?;
+        if queue_index as usize >= phd.queue_families().len() {
+            return Err(DeviceError::NoUsableQueue);
+        }
 
         let mem_properties = unsafe {
             phd.instance()
@@ -91,7 +91,7 @@ impl Device {
         };
 
         let queue_info = DeviceQueueCreateInfo::default()
-            .queue_family_index(queue_index as u32)
+            .queue_family_index(queue_index)
             .queue_priorities(&[0.0]);
 
         let queue_create_infos: &[DeviceQueueCreateInfo<'_>] = &[queue_info];
@@ -108,7 +108,7 @@ impl Device {
                 .map_err(DeviceError::Vk)?
         };
 
-        let queue = unsafe { device.get_device_queue(queue_index as u32, 0) };
+        let queue = unsafe { device.get_device_queue(queue_index, 0) };
 
         let khr_external_semaphore_fd = if extensions
             .iter()
@@ -166,8 +166,22 @@ impl Device {
             None
         };
 
+        let khr_push_descriptor = if extensions.iter().any(|ext| ext == &khr::push_descriptor::NAME) {
+            Some(khr::push_descriptor::Device::new(
+                phd.instance().handle(),
+                &device,
+            ))
+        } else {
+            None
+        };
+        let queue_family_foreign = extensions
+            .iter()
+            .any(|ext| ext.to_bytes() == b"VK_EXT_queue_family_foreign");
+
         Ok(Device(Arc::new(InnerDevice {
             vk: device,
+            khr_push_descriptor,
+            queue_family_foreign,
             khr_external_semaphore_fd,
             khr_external_memory_fd,
             ext_image_drm_format_modifier,
@@ -183,66 +197,99 @@ impl Device {
                 .or_else(|| phd.primary_node().ok().flatten()),
 
             queue,
-            queue_idx: queue_index as u32,
+            queue_idx: queue_index,
 
             context: ContextId::new(),
+            _instance: phd.instance().clone(),
         })))
     }
 
+    /// Returns the underlying `ash` device.
     pub fn vk(&self) -> &VkDevice {
         &self.0.vk
     }
 
+    /// Returns the `VK_KHR_external_semaphore_fd` functions, if the extension is enabled.
     pub fn vk_khr_external_semaphore_fd(&self) -> Option<&khr::external_semaphore_fd::Device> {
         self.0.khr_external_semaphore_fd.as_ref()
     }
 
+    /// Returns the `VK_KHR_external_memory_fd` functions, if the extension is enabled.
     pub fn vk_khr_external_memory_fd(&self) -> Option<&khr::external_memory_fd::Device> {
         self.0.khr_external_memory_fd.as_ref()
     }
 
+    /// Returns the `VK_EXT_image_drm_format_modifier` functions, if the extension is enabled.
     pub fn vk_ext_image_drm_format_modifier(&self) -> Option<&ext::image_drm_format_modifier::Device> {
         self.0.ext_image_drm_format_modifier.as_ref()
     }
 
+    /// Returns the `VK_EXT_external_memory_host` functions and the minimum host pointer alignment, if the extension is enabled.
     pub fn vk_ext_external_memory_host(&self) -> Option<&(ext::external_memory_host::Device, u64)> {
         self.0.ext_external_memory_host.as_ref()
     }
 
+    /// Returns the `VK_KHR_external_fence_fd` functions, if the extension is enabled.
     pub fn vk_khr_external_fence_fd(&self) -> Option<&khr::external_fence_fd::Device> {
         self.0.khr_external_fence_fd.as_ref()
     }
 
+    /// Returns the `VK_KHR_push_descriptor` functions, if the extension is enabled.
+    pub fn vk_khr_push_descriptor(&self) -> Option<&khr::push_descriptor::Device> {
+        self.0.khr_push_descriptor.as_ref()
+    }
+
+    /// The queue family index to use when transferring ownership of an image to or from
+    /// another device or process (e.g. a DMA-BUF).
+    ///
+    /// This is `VK_QUEUE_FAMILY_FOREIGN_EXT` if `VK_EXT_queue_family_foreign` is enabled,
+    /// and `VK_QUEUE_FAMILY_EXTERNAL` otherwise.
+    pub fn external_queue_family(&self) -> u32 {
+        if self.0.queue_family_foreign {
+            vk::QUEUE_FAMILY_FOREIGN_EXT
+        } else {
+            vk::QUEUE_FAMILY_EXTERNAL
+        }
+    }
+
+    /// Returns the memory properties of the physical device.
     pub fn memory_properties(&self) -> &PhysicalDeviceMemoryProperties {
         &self.0.mem_properties
     }
 
+    /// Returns the queue of the device.
     pub fn queue(&self) -> &Queue {
         &self.0.queue
     }
 
+    /// Returns the index of the queue family that the queue belongs to.
     pub fn queue_family_idx(&self) -> u32 {
         self.0.queue_idx
     }
 
+    /// Returns the DRM formats that the device supports.
     pub fn formats(&self) -> impl Iterator<Item = &FormatEntry> {
         self.0.formats.iter()
     }
 
+    /// Returns the DRM node of the device, if it has one.
     pub fn node(&self) -> Option<DrmNode> {
         self.0.node.clone()
     }
 
+    /// Creates a [`WeakDevice`] for this device.
     pub fn downgrade(&self) -> WeakDevice {
         WeakDevice(Arc::downgrade(&self.0))
     }
 
+    /// Returns the context id of the device.
     pub fn context(&self) -> ContextId<VulkanImage> {
         self.0.context.clone()
     }
 }
 
 impl WeakDevice {
+    /// Upgrades to a [`Device`], if it was not destroyed yet.
     pub fn upgrade(&self) -> Option<Device> {
         self.0.upgrade().map(Device)
     }
@@ -255,6 +302,8 @@ struct InnerDevice {
     ext_image_drm_format_modifier: Option<ext::image_drm_format_modifier::Device>,
     ext_external_memory_host: Option<(ext::external_memory_host::Device, u64)>,
     khr_external_fence_fd: Option<khr::external_fence_fd::Device>,
+    khr_push_descriptor: Option<khr::push_descriptor::Device>,
+    queue_family_foreign: bool,
 
     mem_properties: PhysicalDeviceMemoryProperties,
     formats: super::FormatList,
@@ -265,6 +314,10 @@ struct InnerDevice {
     queue_idx: u32,
 
     context: ContextId<VulkanImage>,
+
+    /// Keeps the instance alive until the device is destroyed. `Drop` destroys the device
+    /// before the fields are dropped.
+    _instance: super::Instance,
 }
 
 impl fmt::Debug for InnerDevice {
@@ -278,5 +331,70 @@ impl Drop for InnerDevice {
         unsafe {
             self.vk.destroy_device(None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn families(flags: &[QueueFlags]) -> Vec<vk::QueueFamilyProperties> {
+        flags
+            .iter()
+            .map(|&queue_flags| vk::QueueFamilyProperties {
+                queue_flags,
+                queue_count: 1,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    const GFX: QueueFlags = QueueFlags::from_raw(
+        QueueFlags::GRAPHICS.as_raw() | QueueFlags::COMPUTE.as_raw() | QueueFlags::TRANSFER.as_raw(),
+    );
+    const COMPUTE: QueueFlags =
+        QueueFlags::from_raw(QueueFlags::COMPUTE.as_raw() | QueueFlags::TRANSFER.as_raw());
+    const ENCODE: QueueFlags =
+        QueueFlags::from_raw(QueueFlags::TRANSFER.as_raw() | QueueFlags::VIDEO_ENCODE_KHR.as_raw());
+
+    fn dedicated_compute(flags: &[QueueFlags]) -> Option<u32> {
+        select_queue_family(&families(flags), QueueFlags::COMPUTE, QueueFlags::GRAPHICS)
+    }
+
+    #[test]
+    fn prefers_dedicated_compute_family() {
+        // RADV: graphics, compute, encode.
+        assert_eq!(dedicated_compute(&[GFX, COMPUTE, ENCODE]), Some(1));
+        // NVIDIA: graphics, transfer, compute, encode.
+        assert_eq!(
+            dedicated_compute(&[GFX, QueueFlags::TRANSFER, COMPUTE, ENCODE]),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn falls_back_to_graphics_family() {
+        // ANV: graphics, encode.
+        assert_eq!(dedicated_compute(&[GFX, ENCODE]), Some(0));
+        assert_eq!(dedicated_compute(&[ENCODE]), None);
+    }
+
+    #[test]
+    fn skips_families_without_queues() {
+        let mut families = families(&[GFX, COMPUTE]);
+        families[1].queue_count = 0;
+        assert_eq!(
+            select_queue_family(&families, QueueFlags::COMPUTE, QueueFlags::GRAPHICS),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn graphics_and_compute_families_imply_transfer() {
+        let families = families(&[QueueFlags::GRAPHICS | QueueFlags::COMPUTE]);
+        assert_eq!(
+            select_queue_family(&families, QueueFlags::TRANSFER, QueueFlags::empty()),
+            Some(0)
+        );
     }
 }

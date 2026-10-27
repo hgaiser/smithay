@@ -25,28 +25,31 @@ use std::{
 
 use ash::{
     ext, khr,
-    vk::{self, PhysicalDeviceFeatures2},
+    vk::{self, PhysicalDeviceFeatures2, QueueFlags},
 };
 use drm_fourcc::{DrmFormat, DrmFourcc, DrmModifier};
 use tracing::instrument;
+
+// Re-exported for API compatibility with the previous allocator module.
+pub use crate::backend::vulkan::image::ImageUsageFlags;
 
 use crate::{
     backend::{
         allocator::{dmabuf::DmabufFlags, format::has_alpha},
         renderer::vulkan::VulkanRenderer,
         vulkan::{
-            device::{Device, DeviceError, QueueType},
-            image::{Error as ImageError, ImageUsageFlags, VulkanImage},
-            version::Version,
             PhysicalDevice,
+            device::{Device, DeviceError, select_queue_family},
+            image::{Error as ImageError, VulkanImage},
+            version::Version,
         },
     },
     utils::{Buffer as BufferCoord, Size},
 };
 
 use super::{
-    dmabuf::{AsDmabuf, Dmabuf, MAX_PLANES},
     Allocator, Buffer,
+    dmabuf::{AsDmabuf, Dmabuf, MAX_PLANES},
 };
 
 /// Error type for [`VulkanAllocator`].
@@ -138,7 +141,10 @@ impl VulkanAllocator {
 
         let extensions = Self::required_extensions(phd);
         let mut features = PhysicalDeviceFeatures2::default();
-        let device = Device::new(phd, &extensions, &mut features, QueueType::Transfer, true)?;
+        let queue_family =
+            select_queue_family(&phd.queue_families(), QueueFlags::TRANSFER, QueueFlags::empty())
+                .ok_or(DeviceError::NoUsableQueue)?;
+        let device = Device::new(phd, &extensions, &mut features, queue_family)?;
 
         let allocator = VulkanAllocator {
             default_usage,
@@ -149,6 +155,7 @@ impl VulkanAllocator {
         Ok(allocator)
     }
 
+    /// Creates an allocator that uses the physical device and device of `renderer`.
     pub fn from_renderer(renderer: &VulkanRenderer, usage: ImageUsageFlags) -> Self {
         VulkanAllocator {
             default_usage: usage,
@@ -267,11 +274,7 @@ impl AsDmabuf for VulkanImage {
 
     #[profiling::function]
     fn export(&self) -> Result<Dmabuf, Self::Error> {
-        let device = self
-            .inner
-            .device
-            .upgrade()
-            .ok_or(ExportError::AllocatorDestroyed)?;
+        let device = &self.inner.device;
 
         // Was the image created exportable?
         if !self.inner.dmabuf_exportable || self.drm.is_none() {

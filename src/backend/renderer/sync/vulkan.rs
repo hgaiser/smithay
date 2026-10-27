@@ -14,10 +14,13 @@ impl super::Fence for VulkanSync {
     }
 
     fn is_exportable(&self) -> bool {
-        self.timeline.is_exportable()
+        self.timeline.is_exportable() || self.sync_file.is_some()
     }
 
     fn export(&self) -> Option<OwnedFd> {
+        if let Some(sync_file) = &self.sync_file {
+            return sync_file.try_clone().ok();
+        }
         let timeline = self.timeline.export()?;
         let sync = DrmSyncPoint {
             timeline,

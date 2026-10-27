@@ -17,20 +17,21 @@ use tracing::warn;
 #[cfg(feature = "backend_gbm")]
 use crate::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use crate::backend::{
+    SwapBuffersError,
     allocator::{
+        Allocator,
         dmabuf::{AnyError, Dmabuf, DmabufAllocator},
         vulkan::VulkanAllocator,
-        Allocator,
     },
     drm::DrmNode,
     renderer::{
         multigpu::{ApiDevice, GraphicsApi},
         vulkan::{Error as RendererError, VulkanRenderer},
     },
-    vulkan::{instance::InstanceError, Instance, PhysicalDevice, UnsupportedProperty, Version},
-    SwapBuffersError,
+    vulkan::{Instance, PhysicalDevice, UnsupportedProperty, Version, instance::InstanceError},
 };
 
+/// Multi-GPU backend that renders with [`VulkanRenderer`]s and allocates plain Vulkan buffers.
 pub struct VulkanBackend {
     instance: Instance,
     allocator_flags: ImageUsageFlags,
@@ -38,6 +39,7 @@ pub struct VulkanBackend {
 }
 
 #[cfg(feature = "backend_gbm")]
+/// Multi-GPU backend that renders with [`VulkanRenderer`]s and allocates buffers through GBM.
 pub struct GbmVulkanBackend<A: AsFd + 'static> {
     instance: Instance,
     devices: HashMap<DrmNode, (PhysicalDevice, GbmAllocator<A>)>,
@@ -45,6 +47,7 @@ pub struct GbmVulkanBackend<A: AsFd + 'static> {
     needs_enumeration: AtomicBool,
 }
 
+/// A Vulkan device known to the multi-GPU backend, with its renderer and allocator.
 pub struct VulkanDevice {
     node: DrmNode,
     renderer: VulkanRenderer,
@@ -112,6 +115,7 @@ impl fmt::Debug for VulkanDevice {
 }
 
 impl VulkanBackend {
+    /// Creates a backend that allocates images with `allocator_flags`, in addition to storage usage.
     pub fn new(allocator_flags: ImageUsageFlags) -> Result<Self, InstanceError> {
         Ok(VulkanBackend {
             instance: Instance::new(Version::VERSION_1_3, None)?,
@@ -167,6 +171,7 @@ impl GraphicsApi for VulkanBackend {
 
 #[cfg(feature = "backend_gbm")]
 impl<A: AsFd + Clone + 'static> GbmVulkanBackend<A> {
+    /// Creates a backend that allocates buffers with `allocator_flags`.
     pub fn new(allocator_flags: GbmBufferFlags) -> Result<Self, InstanceError> {
         Ok(GbmVulkanBackend {
             instance: Instance::new(Version::VERSION_1_3, None)?,

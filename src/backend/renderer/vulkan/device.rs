@@ -1,8 +1,8 @@
 use std::os::fd::{FromRawFd, OwnedFd};
 
 use crate::backend::{
-    drm::{sync::DrmTimeline, DrmDeviceFd},
-    renderer::vulkan::{cmds::CommandPool, sync::VulkanTimeline, Error},
+    drm::{DrmDeviceFd, sync::DrmTimeline},
+    renderer::vulkan::{Error, cmds::CommandPool, sync::VulkanTimeline},
     vulkan::Device,
 };
 use ash::{
@@ -51,7 +51,13 @@ impl Device {
                         .map_err(Error::SemaphoreError)?,
                 )
             };
-            DrmTimeline::new(&dev, fd).ok()
+            match DrmTimeline::new(&dev, fd) {
+                Ok(timeline) => Some(timeline),
+                Err(err) => {
+                    tracing::debug!(?err, "Failed to import the timeline as a DRM syncobj");
+                    None
+                }
+            }
         } else {
             None
         };

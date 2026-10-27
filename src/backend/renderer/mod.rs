@@ -8,7 +8,7 @@
 //! - Raw OpenGL ES 2
 
 use crate::utils::{Buffer as BufferCoord, Physical, Point, Rectangle, Scale, Size, Transform, ids::id_gen};
-use glam::Affine2;
+use glam::{Affine2, Vec2};
 use std::{
     any::TypeId,
     cmp::Ordering,
@@ -194,6 +194,53 @@ impl Transform {
             Transform::Flipped270 => Affine2::from_cols_array(&[0.0, -1.0, -1.0, 0.0, 0.0, 0.0]),
         }
     }
+}
+
+/// Builds the matrix that maps a point relative to `dest` to normalized texture coordinates.
+///
+/// `src` is the source rectangle in buffer coordinates, `texture` is the texture size and
+/// `transform` is the texture transform of [`Frame::render_texture_from_to`].
+pub(crate) fn texture_matrix(
+    src: Rectangle<f64, BufferCoord>,
+    dest: Rectangle<i32, Physical>,
+    texture: Size<i32, BufferCoord>,
+    transform: Transform,
+) -> Affine2 {
+    let dst_src_size = transform.transform_size(src.size);
+    let scale = dst_src_size.to_f64() / dest.size.to_f64();
+
+    let mut tex_mat = Affine2::IDENTITY;
+
+    // first bring the damage into src scale
+    tex_mat = Affine2::from_scale(Vec2::new(scale.x as f32, scale.y as f32)) * tex_mat;
+
+    // then compensate for the texture transform
+    let transform_mat = transform.matrix();
+    let translation = match transform {
+        Transform::Normal => Affine2::IDENTITY,
+        Transform::_90 => Affine2::from_translation(Vec2::new(0f32, dst_src_size.w as f32)),
+        Transform::_180 => Affine2::from_translation(Vec2::new(dst_src_size.w as f32, dst_src_size.h as f32)),
+        Transform::_270 => Affine2::from_translation(Vec2::new(dst_src_size.h as f32, 0f32)),
+        Transform::Flipped => Affine2::from_translation(Vec2::new(dst_src_size.w as f32, 0f32)),
+        Transform::Flipped90 => Affine2::IDENTITY,
+        Transform::Flipped180 => Affine2::from_translation(Vec2::new(0f32, dst_src_size.h as f32)),
+        Transform::Flipped270 => {
+            Affine2::from_translation(Vec2::new(dst_src_size.h as f32, dst_src_size.w as f32))
+        }
+    };
+    tex_mat = transform_mat * tex_mat;
+    tex_mat = translation * tex_mat;
+
+    // now we can add the src crop loc, the size already done implicit by the src size
+    tex_mat = Affine2::from_translation(Vec2::new(src.loc.x as f32, src.loc.y as f32)) * tex_mat;
+
+    // at last we have to normalize the values for UV space
+    tex_mat = Affine2::from_scale(Vec2::new(
+        (1.0f64 / texture.w as f64) as f32,
+        (1.0f64 / texture.h as f64) as f32,
+    )) * tex_mat;
+
+    tex_mat
 }
 
 #[cfg(feature = "wayland_frontend")]

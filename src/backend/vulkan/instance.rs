@@ -16,7 +16,7 @@ use ash::{ext, vk};
 use scopeguard::ScopeGuard;
 use tracing::{error, info, info_span, warn};
 
-use super::{get_env_or_max_version, vulkan_debug_utils_callback, LoadError, Version, LIBRARY};
+use super::{LIBRARY, LoadError, Version, get_env_or_max_version, vulkan_debug_utils_callback};
 
 /// An error that may occur when creating an [`Instance`].
 #[derive(Debug, thiserror::Error)]
@@ -293,10 +293,15 @@ impl Instance {
     }
 }
 
+/// The state of an [`Instance`] that is shared by its clones.
 pub struct InstanceInner {
+    /// The Vulkan instance.
     pub instance: ash::Instance,
+    /// The API version of the instance.
     pub version: Version,
+    /// The debug messenger, if `VK_EXT_debug_utils` is enabled.
     pub debug_state: Option<DebugState>,
+    /// The tracing span of the instance.
     pub span: tracing::Span,
 
     /// Enabled instance extensions.
@@ -308,10 +313,22 @@ pub struct InstanceInner {
 unsafe impl Send for InstanceInner {}
 unsafe impl Sync for InstanceInner {}
 
+/// The state of the debug messenger.
 pub struct DebugState {
+    /// The `VK_EXT_debug_utils` functions.
     pub debug_utils: ext::debug_utils::Instance,
+    /// The debug messenger handle.
     pub debug_messenger: vk::DebugUtilsMessengerEXT,
+    /// The span that the debug messenger logs to, as a raw pointer owned by this state.
     pub span_ptr: *mut tracing::Span,
+}
+
+impl fmt::Debug for DebugState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DebugState")
+            .field("debug_messenger", &self.debug_messenger)
+            .finish_non_exhaustive()
+    }
 }
 
 impl fmt::Debug for InstanceInner {

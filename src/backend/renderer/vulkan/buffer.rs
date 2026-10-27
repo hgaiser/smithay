@@ -8,21 +8,24 @@ use ash::{
     },
 };
 use std::{
-    ffi::{c_void, CStr},
+    ffi::{CStr, c_void},
     ptr::NonNull,
 };
 
-use crate::backend::vulkan::{device::WeakDevice, Device};
+use crate::backend::vulkan::Device;
 
 #[derive(Debug)]
 pub struct Buffer {
-    device: WeakDevice,
+    device: Device,
 
     buf: vk::Buffer,
     memory: vk::DeviceMemory,
     map: Option<NonNull<c_void>>,
 
+    // Informational, only read through `is_device_local`.
+    #[allow(dead_code)]
     device_local: bool,
+    #[allow(dead_code)]
     size: usize,
 }
 
@@ -45,26 +48,37 @@ fn mem_idx(mem_props: &PhysicalDeviceMemoryProperties, mask: u32, flags: MemoryP
 }
 
 #[derive(Debug, thiserror::Error)]
+/// Errors that can occur when creating a [`Buffer`].
 pub enum Error {
     #[error("Failed to find a memory type satisfying all constraints")]
+    /// No memory type satisfies all constraints.
     NoMatchingMemoryType,
     #[error("Failed to create buffer")]
+    /// Creating the buffer failed.
     BufferCreation(#[source] vk::Result),
     #[error("Failed to allocate device memory")]
+    /// Allocating device memory failed.
     Allocation(#[source] vk::Result),
     #[error("Failed to bind buffer to device memory")]
+    /// Binding the buffer to the device memory failed.
     BindingBuffer(#[source] vk::Result),
     #[error("Missing extension for buffer creation: {0:?}")]
+    /// A required extension is missing.
     MissingExtension(&'static CStr),
     #[error("Invalid pointer alignment for operation")]
+    /// The pointer or length has an invalid alignment.
     InvalidAlignment,
     #[error("Failed to query host pointer properties")]
+    /// Querying the host pointer memory properties failed.
     HostPtrQuery(#[source] vk::Result),
     #[error("Failed to map device memory")]
+    /// Mapping the device memory failed.
     Map(#[source] vk::Result),
 }
 
+#[allow(dead_code)]
 impl Buffer {
+    /// Wraps host memory at `data` in a buffer, using `VK_EXT_external_memory_host`.
     pub fn from_ptr(
         device: &Device,
         data: *mut u8,
@@ -133,7 +147,7 @@ impl Buffer {
         }
 
         Ok(Buffer {
-            device: device.downgrade(),
+            device: device.clone(),
 
             buf: buffer,
             memory,
@@ -226,7 +240,7 @@ impl Buffer {
         };
 
         Ok(Buffer {
-            device: device.downgrade(),
+            device: device.clone(),
 
             buf: buffer,
             memory,
@@ -252,7 +266,8 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        if let Some(device) = self.device.upgrade() {
+        {
+            let device = &self.device;
             unsafe {
                 device.vk().destroy_buffer(self.buf, None);
                 if let Some(_) = self.map.take() {

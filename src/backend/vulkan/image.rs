@@ -1,18 +1,24 @@
-use std::{fmt, io, os::fd::IntoRawFd, sync::Arc};
+use std::{
+    fmt, io,
+    os::fd::{AsRawFd, IntoRawFd},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 pub use ash::vk::ImageUsageFlags;
 use ash::vk::{self, ImageTiling, MemoryPropertyFlags};
 #[cfg(feature = "backend_drm")]
 use drm::node::DrmNode;
 
-use super::device::WeakDevice;
 use crate::backend::{
     allocator::{
+        Buffer, Format, Fourcc, Modifier,
         dmabuf::Dmabuf,
         format::{get_transparent, has_alpha},
-        Buffer, Format, Fourcc, Modifier,
     },
-    vulkan::{format::component_mapping_for_format, Device},
+    vulkan::Device,
 };
 
 /// Vulkan image object.
@@ -53,35 +59,48 @@ impl fmt::Debug for VulkanImage {
 /// Errors created when creating or manipulating `VulkanImage`s.
 pub enum Error {
     #[error("Size provided isn't valid")]
+    /// The size is not valid.
     InvalidSize,
     #[error("Format not supported")]
+    /// The format is not supported.
     UnsupportedFormat,
     #[error("Invalid or unsupported (distinct planes) dmabuf")]
+    /// The dmabuf is invalid or unsupported (distinct planes).
     UnsupportedDmabuf,
     #[error("Missing or invalid image usage flags for the requested operation")]
+    /// The image usage flags are missing or invalid for the requested operation.
     MissingOrInvalidUsage,
     #[error("Unable to find a supported memory type for the allocation")]
+    /// No supported memory type was found for the allocation.
     NoMemoryAvailable,
     #[error("Creating vulkan image failed")]
+    /// Creating the image failed.
     VulkanImage(#[source] vk::Result),
     #[error("Querying the vulkan image's modifier failed")]
+    /// Querying the modifier of the image failed.
     VulkanModifierQuery(#[source] vk::Result),
     #[error("Allocating vulkan device memory for the image failed")]
+    /// Allocating the device memory for the image failed.
     VulkanAllocate(#[source] vk::Result),
     #[error("Binding the vulkan device memory to the image failed")]
+    /// Binding the device memory to the image failed.
     VulkanBind(#[source] vk::Result),
     #[error("Creating a vulkan image view")]
+    /// Creating the image view failed.
     VulkanImageView(#[source] vk::Result),
     #[error("Failed to clone the dmabuf fd")]
+    /// Duplicating the dmabuf file descriptor failed.
     DmabufFdError(#[source] io::Error),
 }
 
 impl VulkanImage {
+    /// Creates an image with a Vulkan `format`, which is `linear` if requested.
     pub fn new(
         device: &Device,
         width: u32,
         height: u32,
         format: vk::Format,
+        has_alpha: bool,
         usage: vk::ImageUsageFlags,
         linear: bool,
     ) -> Result<Self, Error> {
@@ -90,6 +109,7 @@ impl VulkanImage {
             width,
             height,
             format,
+            has_alpha,
             usage,
             linear,
             false,
@@ -98,6 +118,7 @@ impl VulkanImage {
         )
     }
 
+    /// Creates an image with `format`, using one of the `modifiers`.
     pub fn new_exact_modifier(
         device: &Device,
         width: u32,
@@ -112,6 +133,7 @@ impl VulkanImage {
             width,
             height,
             vk_format,
+            has_alpha(format),
             usage,
             false,
             false,
@@ -120,6 +142,7 @@ impl VulkanImage {
         )
     }
 
+    /// Creates an image with `format`, using one of the `modifiers`, that can be exported as a dmabuf.
     pub fn new_exportable(
         device: &Device,
         width: u32,
@@ -134,6 +157,7 @@ impl VulkanImage {
             width,
             height,
             vk_format,
+            has_alpha(format),
             usage,
             false,
             true,
@@ -142,6 +166,7 @@ impl VulkanImage {
         )
     }
 
+    /// Imports a dmabuf as an image.
     pub fn new_from_dmabuf(
         device: &Device,
         dmabuf: &Dmabuf,
@@ -170,6 +195,7 @@ impl VulkanImage {
             width,
             height,
             vk_format,
+            has_alpha(dmabuf.format().code),
             usage,
             false,
             false,
@@ -183,6 +209,7 @@ impl VulkanImage {
         width: u32,
         height: u32,
         vk_format: vk::Format,
+        has_alpha: bool,
         vk_usage: vk::ImageUsageFlags,
         linear: bool,
         exportable: bool,
@@ -192,7 +219,6 @@ impl VulkanImage {
         let (fourcc, modifiers) = modifiers
             .map(|(fourcc, modifiers)| (fourcc, modifiers.into_iter().map(u64::from).collect::<Vec<_>>()))
             .unzip();
-        let has_alpha = fourcc.is_none_or(|fourcc| has_alpha(fourcc));
         let fourcc = fourcc.map(|fourcc| get_transparent(fourcc).unwrap_or(fourcc));
         let mut modifier_list = modifiers.as_deref().map(|modifiers| {
             vk::ImageDrmFormatModifierListCreateInfoEXT::default().drm_format_modifiers(modifiers)
@@ -266,10 +292,11 @@ impl VulkanImage {
                     .map_err(Error::VulkanImage)?
             },
             memory: vk::DeviceMemory::null(),
-            device: device.downgrade(),
+            device: device.clone(),
             view: None,
             dmabuf_exportable: exportable || dmabuf.is_some(),
             dmabuf_plane_count: dmabuf.map(|dmabuf| dmabuf.num_planes() as u32).unwrap_or(0),
+            initialized: AtomicBool::new(false),
         };
 
         let drm_format = fourcc
@@ -312,6 +339,25 @@ impl VulkanImage {
         // TODO: Memory type index
         let mut alloc_create_info = vk::MemoryAllocateInfo::default().allocation_size(memory_reqs.size);
 
+        // An imported DMA-BUF also restricts the memory types to those the fd can be imported as.
+        let mut memory_type_bits = memory_reqs.memory_type_bits;
+        if let Some(dmabuf) = dmabuf {
+            let handle = dmabuf.handles().next().unwrap();
+            let mut fd_properties = vk::MemoryFdPropertiesKHR::default();
+            unsafe {
+                device
+                    .vk_khr_external_memory_fd()
+                    .ok_or(Error::UnsupportedDmabuf)?
+                    .get_memory_fd_properties(
+                        vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+                        handle.as_raw_fd(),
+                        &mut fd_properties,
+                    )
+                    .map_err(|_| Error::UnsupportedDmabuf)?;
+            }
+            memory_type_bits &= fd_properties.memory_type_bits;
+        }
+
         let mut mem_bits = None;
         for (i, types) in device
             .memory_properties()
@@ -319,7 +365,7 @@ impl VulkanImage {
             .iter()
             .enumerate()
         {
-            if memory_reqs.memory_type_bits & (i as u32) != 0
+            if memory_type_bits & (1 << i) != 0
                 && types.property_flags.contains(MemoryPropertyFlags::DEVICE_LOCAL)
             {
                 alloc_create_info = alloc_create_info.memory_type_index(i as u32);
@@ -341,7 +387,8 @@ impl VulkanImage {
             alloc_create_info = alloc_create_info.push_next(&mut memory_dedicated_info);
         }
 
-        if inner.dmabuf_exportable {
+        // Imported memory is exportable already; an export request would allocate new memory.
+        if inner.dmabuf_exportable && dmabuf.is_none() {
             memory_export_info = vk::ExportMemoryAllocateInfo::default()
                 .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
             alloc_create_info = alloc_create_info.push_next(&mut memory_export_info);
@@ -380,16 +427,9 @@ impl VulkanImage {
                 .image(inner.image)
                 .view_type(vk::ImageViewType::TYPE_2D)
                 .format(vk_format)
-                .components(if vk_usage.contains(vk::ImageUsageFlags::STORAGE) {
-                    vk::ComponentMapping {
-                        r: vk::ComponentSwizzle::IDENTITY,
-                        g: vk::ComponentSwizzle::IDENTITY,
-                        b: vk::ComponentSwizzle::IDENTITY,
-                        a: vk::ComponentSwizzle::IDENTITY,
-                    }
-                } else {
-                    component_mapping_for_format(vk_format, has_alpha)
-                })
+                // The Vulkan format already describes the channel order, and storage views must
+                // use the identity mapping. The renderer ignores the alpha of `!has_alpha` images.
+                .components(vk::ComponentMapping::default())
                 .subresource_range(
                     vk::ImageSubresourceRange::default()
                         .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -429,34 +469,55 @@ impl VulkanImage {
         })
     }
 
+    /// Returns the width of the image in pixels.
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// Returns the height of the image in pixels.
     pub fn height(&self) -> u32 {
         self.height
     }
 
+    /// Returns the Vulkan format of the image.
     pub fn format(&self) -> vk::Format {
         self.format
     }
 
+    /// Returns the Vulkan image handle.
     pub fn vk(&self) -> &vk::Image {
         &self.inner.image
     }
 
+    /// Returns the Vulkan image view, if the image has one.
     pub fn vk_view(&self) -> Option<&vk::ImageView> {
         self.inner.view.as_ref()
     }
 
+    /// Returns the usage flags of the image.
     pub fn vk_usage(&self) -> ImageUsageFlags {
         self.usage
     }
 
+    /// Returns the memory property flags of the memory that the image was created with.
     pub fn mem_bits(&self) -> MemoryPropertyFlags {
         self.mem_types
     }
 
+    /// Whether the image can be shared with other devices or processes as a DMA-BUF.
+    pub(crate) fn is_external(&self) -> bool {
+        self.inner.dmabuf_exportable
+    }
+
+    /// Marks the image as having left `UNDEFINED` layout and returns whether it already had.
+    ///
+    /// Renderers keep images in `GENERAL` layout once they have been used, so this is all
+    /// the layout tracking that is needed.
+    pub(crate) fn mark_initialized(&self) -> bool {
+        self.inner.initialized.swap(true, Ordering::Relaxed)
+    }
+
+    /// Whether the image has a linear layout.
     pub fn is_linear(&self) -> bool {
         self.tiling == ImageTiling::LINEAR
             || (self.tiling == ImageTiling::DRM_FORMAT_MODIFIER_EXT
@@ -472,16 +533,20 @@ pub(crate) struct ImageInner {
     pub(crate) image: vk::Image,
     // might be a null handle
     pub(crate) memory: vk::DeviceMemory,
-    pub(crate) device: WeakDevice,
+    pub(crate) device: Device,
     pub(crate) view: Option<vk::ImageView>,
 
     pub(crate) dmabuf_exportable: bool,
     pub(crate) dmabuf_plane_count: u32,
+
+    /// Whether the image was transitioned out of `UNDEFINED` layout by a renderer.
+    pub(crate) initialized: AtomicBool,
 }
 
 impl Drop for ImageInner {
     fn drop(&mut self) {
-        if let Some(device) = self.device.upgrade() {
+        {
+            let device = &self.device;
             unsafe {
                 let vk = device.vk();
                 if let Some(view) = self.view.as_ref() {

@@ -1,24 +1,20 @@
-use std::{fs, time::Duration};
+use std::fs;
 
 use ash::vk::FormatFeatureFlags;
 use drm_fourcc::{DrmFourcc, DrmModifier};
 use rustix::fs::{Mode, OFlags};
 use smithay::{
     backend::{
-        allocator::{dmabuf::AsDmabuf, format::FormatSet, vulkan::VulkanAllocator, Allocator, Buffer},
+        allocator::{Allocator, format::FormatSet, vulkan::VulkanAllocator},
         drm::DrmDeviceFd,
-        egl::{EGLContext, EGLDevice, EGLDisplay},
         renderer::{
-            gles::{GlesError, GlesRenderer},
-            sync::Interrupted,
-            vulkan::VulkanRenderer,
-            Bind, Color32F, ExportMem, Frame, ImportMem, Renderer,
+            Bind, Color32F, ExportMem, Frame, ImportMem, Renderer, sync::Interrupted, vulkan::VulkanRenderer,
         },
         vulkan::{
+            Instance, PhysicalDevice,
             format::{get_vk_format, known_formats},
             image::{ImageUsageFlags, VulkanImage},
             version::Version,
-            Instance, PhysicalDevice,
         },
     },
     utils::{DeviceFd, Point, Rectangle, Size, Transform},
@@ -83,28 +79,24 @@ fn main() {
         .expect("open render node"),
     ));
     let mut renderer = VulkanRenderer::new(&physical_device, Some(drm.clone())).expect("renderer");
+    println!(
+        "queue family {} (dedicated compute: {})",
+        renderer.queue_family_index(),
+        renderer.is_dedicated_compute_queue()
+    );
 
     // The allocator should create buffers that are suitable as render targets.
     let mut allocator = VulkanAllocator::from_renderer(
         &renderer,
-        ImageUsageFlags::STORAGE | ImageUsageFlags::HOST_TRANSFER_EXT,
+        ImageUsageFlags::STORAGE | ImageUsageFlags::TRANSFER_SRC,
     );
     let formats = Bind::<VulkanImage>::supported_formats(&renderer)
         .unwrap()
         .into_iter()
-        .filter(|format| {
-            format.code == DrmFourcc::Abgr8888
-                || format.code == DrmFourcc::Argb8888
-                || format.code == DrmFourcc::Rgba8888
-                || format.code == DrmFourcc::Bgra8888
-        })
+        // Abgr8888 is RGBA in memory, which matches the PNG written below.
+        .filter(|format| format.code == DrmFourcc::Abgr8888)
         .collect::<FormatSet>();
     let selected_format = dbg!(formats.iter().next().expect("No format found").code);
-    let modifiers = formats
-        .into_iter()
-        .filter(|fmt| fmt.code == selected_format)
-        .map(|fmt| fmt.modifier)
-        .collect::<Vec<_>>();
 
     let size = Size::new(512_i32, 512_i32);
     let mut image = allocator
@@ -113,7 +105,7 @@ fn main() {
             size.h as u32,
             selected_format,
             &[DrmModifier::Linear],
-        ) //&modifiers)
+        )
         .expect("create");
 
     let png = image::open("./examples/resources/cursor.png").unwrap();

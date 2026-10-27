@@ -1,18 +1,18 @@
 use ash::vk::{
-    self, AccessFlags, BufferImageCopy2, BufferUsageFlags, CopyBufferToImageInfo2, DependencyFlags, Extent3D,
-    ExternalMemoryHandleTypeFlags, Fence, ImageAspectFlags, ImageLayout, ImageMemoryBarrier,
-    ImageSubresourceLayers, ImageSubresourceRange, ImageUsageFlags, Offset3D, PipelineStageFlags, SubmitInfo,
-    TimelineSemaphoreSubmitInfo, QUEUE_FAMILY_IGNORED,
+    self, AccessFlags2, BufferImageCopy2, BufferUsageFlags, CopyBufferToImageInfo2, Extent3D,
+    ImageAspectFlags, ImageLayout, ImageSubresourceLayers, ImageUsageFlags, Offset3D, PipelineStageFlags2,
 };
 use smallvec::SmallVec;
-use tracing::debug;
 
 use crate::{
     backend::{
-        allocator::{format::get_bpp, Buffer as _},
-        renderer::vulkan::{buffer::Buffer, Error, VulkanRenderer},
+        allocator::{
+            Buffer as _, Fourcc,
+            format::{get_bpp, has_alpha},
+        },
+        renderer::vulkan::{Error, VulkanRenderer, buffer::Buffer},
         vulkan::{
-            format::get_drm_format,
+            format::{get_drm_format, get_vk_format},
             image::{Error as ImageError, VulkanImage},
         },
     },
@@ -20,44 +20,55 @@ use crate::{
 };
 
 impl VulkanRenderer {
+    /// Copies `data` into a host visible staging buffer.
+    ///
+    /// The data is always copied, as the caller's memory is only valid for the duration of
+    /// the call, while the upload is executed asynchronously.
+    fn staging_buffer(&self, data: &[u8]) -> Result<Buffer, Error> {
+        let buffer = Buffer::new(
+            &self.device,
+            data.len(),
+            None,
+            BufferUsageFlags::TRANSFER_SRC,
+            true,
+        )?;
+        let dst = buffer.mapped_ptr().unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dst.as_ptr() as *mut u8, data.len());
+        }
+        Ok(buffer)
+    }
+
+    /// Records and submits a copy of `regions` of `buf` into `img`.
+    ///
+    /// `buf` holds the image data with the given `stride`, regions are located at their
+    /// position in the image. The copy is not waited for, the buffer is kept alive until it
+    /// is done. Later work on the same queue that uses the image is ordered after the copy
+    /// by the barrier that is recorded when the image is first used.
     fn update_from_buffer(
         &mut self,
         img: &VulkanImage,
-        buf: &Buffer,
+        buf: Buffer,
         stride: usize,
         bpp: usize,
         regions: &[Rectangle<i32, BufferCoords>],
     ) -> Result<u64, Error> {
         let size = img.size();
-        let cmd = self.cmd_pool.create_and_begin_buffer()?;
+        let mut recording = self.begin_recording()?;
+        recording.skip_foreign_fences();
+        recording.use_image(
+            &self.device,
+            img,
+            PipelineStageFlags2::ALL_TRANSFER,
+            AccessFlags2::TRANSFER_WRITE,
+        );
+        let cmd = recording.cmd();
         unsafe {
-            self.device.vk().cmd_pipeline_barrier(
-                cmd,
-                PipelineStageFlags::TRANSFER,
-                PipelineStageFlags::TRANSFER,
-                DependencyFlags::empty(),
-                &[],
-                &[],
-                &[ImageMemoryBarrier::default()
-                    .image(*img.vk())
-                    .old_layout(ImageLayout::UNDEFINED)
-                    .new_layout(ImageLayout::GENERAL)
-                    .src_queue_family_index(QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(QUEUE_FAMILY_IGNORED)
-                    .src_access_mask(AccessFlags::empty())
-                    .dst_access_mask(AccessFlags::empty())
-                    .subresource_range(
-                        ImageSubresourceRange::default()
-                            .aspect_mask(ImageAspectFlags::COLOR)
-                            .layer_count(1)
-                            .level_count(1),
-                    )],
-            );
             let regions = regions
                 .iter()
                 .map(|rect| {
                     BufferImageCopy2::default()
-                        .buffer_offset(0)
+                        .buffer_offset((stride * rect.loc.y as usize + bpp * rect.loc.x as usize) as u64)
                         .buffer_row_length((stride / bpp) as u32)
                         .buffer_image_height(size.h as u32)
                         .image_subresource(
@@ -82,35 +93,28 @@ impl VulkanRenderer {
                 .dst_image_layout(ImageLayout::GENERAL)
                 .regions(&regions);
             self.device.vk().cmd_copy_buffer_to_image2(cmd, &info);
-            self.device
-                .vk()
-                .end_command_buffer(cmd)
-                .map_err(Error::CommandBufferError)?;
         }
 
-        self.seq_no += 1;
-        let next_seq_no = [self.seq_no];
-        let mut timeline_info = TimelineSemaphoreSubmitInfo::default().signal_semaphore_values(&next_seq_no);
+        recording.keep_alive(buf);
+        self.submit_recording(recording)
+    }
 
-        unsafe {
-            self.device
-                .vk()
-                .queue_submit(
-                    *self.device.queue(),
-                    &[SubmitInfo::default()
-                        .command_buffers(&[cmd])
-                        .signal_semaphores(&[self.timeline.vk()])
-                        .push_next(&mut timeline_info)],
-                    Fence::null(),
-                )
-                .map_err(Error::SubmitError)?;
-        }
-
-        self.cmd_pool
-            .store_pending_buffer(cmd, next_seq_no[0], None, std::iter::once(img.clone()));
-        unsafe { self.device.vk().device_wait_idle() }; // BIG TODO
-
-        Ok(next_seq_no[0])
+    fn new_image(
+        &self,
+        size: Size<i32, BufferCoords>,
+        fourcc: Fourcc,
+        usage: vk::ImageUsageFlags,
+    ) -> Result<VulkanImage, Error> {
+        let format = get_vk_format(fourcc).ok_or(ImageError::UnsupportedFormat)?;
+        Ok(VulkanImage::new(
+            &self.device,
+            size.w as u32,
+            size.h as u32,
+            format,
+            has_alpha(fourcc),
+            usage | ImageUsageFlags::TRANSFER_DST,
+            false,
+        )?)
     }
 
     pub(super) fn upload_from_slice(
@@ -118,50 +122,16 @@ impl VulkanRenderer {
         data: &[u8],
         size: Size<i32, BufferCoords>,
         stride: usize,
-        format: vk::Format,
+        fourcc: Fourcc,
         usage: vk::ImageUsageFlags,
     ) -> Result<VulkanImage, Error> {
-        let bpp = get_drm_format(format)
-            .and_then(get_bpp)
-            .ok_or(ImageError::UnsupportedFormat)?
-            / 8;
-        let buffer = match Buffer::from_ptr(
-            &self.device,
-            unsafe { std::mem::transmute(data.as_ptr()) },
-            data.len(),
-            ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT,
-            BufferUsageFlags::TRANSFER_SRC,
-        ) {
-            Ok(buf) => buf,
-            Err(err) => {
-                debug!("EXT_External_memory_host error: {:?}", err);
-                let buffer = Buffer::new(
-                    &self.device,
-                    data.len(),
-                    None,
-                    BufferUsageFlags::TRANSFER_SRC,
-                    true,
-                )?;
-                let dst = buffer.mapped_ptr().unwrap();
-                unsafe {
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), dst.as_ptr() as *mut _, data.len());
-                }
-                buffer
-            }
-        };
-
-        let image = VulkanImage::new(
-            &self.device,
-            size.w as u32,
-            size.h as u32,
-            format,
-            usage | ImageUsageFlags::TRANSFER_DST,
-            false,
-        )?;
+        let bpp = get_bpp(fourcc).ok_or(ImageError::UnsupportedFormat)? / 8;
+        let buffer = self.staging_buffer(data)?;
+        let image = self.new_image(size, fourcc, usage)?;
 
         self.update_from_buffer(
             &image,
-            &buffer,
+            buffer,
             stride,
             bpp,
             &[Rectangle::new(Point::new(0, 0), size)],
@@ -183,97 +153,15 @@ impl VulkanRenderer {
             .ok_or(ImageError::UnsupportedFormat)?
             / 8;
 
-        let buffer = match Buffer::from_ptr(
-            &self.device,
-            unsafe { std::mem::transmute(data.as_ptr()) },
-            data.len(),
-            ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT,
-            BufferUsageFlags::TRANSFER_SRC,
-        ) {
-            Ok(buf) => buf,
-            Err(err) => {
-                debug!("EXT_External_memory_host error: {:?}", err);
-                let buffer = Buffer::new(
-                    &self.device,
-                    data.len(),
-                    None,
-                    BufferUsageFlags::TRANSFER_SRC,
-                    true,
-                )?;
-                let dst = buffer.mapped_ptr().unwrap();
-                for region in regions {
-                    let offset = (stride * region.loc.y as usize + region.loc.x as usize * bpp) as isize;
-                    let len = stride * (region.size.h as usize - 1) + region.size.w as usize * bpp;
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            data.as_ptr().offset(offset),
-                            dst.as_ptr() as *mut _,
-                            len,
-                        );
-                    }
-                }
-                buffer
-            }
-        };
-
-        self.update_from_buffer(image, &buffer, stride, bpp, regions)?;
+        let buffer = self.staging_buffer(data)?;
+        self.update_from_buffer(image, buffer, stride, bpp, regions)?;
 
         Ok(())
     }
 
-    // TODO: Safety, ptr must live until the sequence is done
-    pub(super) fn upload_from_shm(
-        &mut self,
-        data: *const u8,
-        len: usize,
-        size: Size<i32, BufferCoords>,
-        stride: usize,
-        format: vk::Format,
-        usage: vk::ImageUsageFlags,
-    ) -> Result<VulkanImage, Error> {
-        let bpp = get_drm_format(format)
-            .and_then(get_bpp)
-            .ok_or(ImageError::UnsupportedFormat)?
-            / 8;
-        let buffer = match Buffer::from_ptr(
-            &self.device,
-            unsafe { std::mem::transmute(data) },
-            len,
-            ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT,
-            BufferUsageFlags::TRANSFER_SRC,
-        ) {
-            Ok(buf) => buf,
-            Err(err) => {
-                debug!("EXT_External_memory_host error: {:?}", err);
-                let buffer = Buffer::new(&self.device, len, None, BufferUsageFlags::TRANSFER_SRC, true)?;
-                let dst = buffer.mapped_ptr().unwrap();
-                unsafe {
-                    std::ptr::copy_nonoverlapping(data, dst.as_ptr() as *mut _, len);
-                }
-                buffer
-            }
-        };
-
-        let image = VulkanImage::new(
-            &self.device,
-            size.w as u32,
-            size.h as u32,
-            format,
-            usage | ImageUsageFlags::TRANSFER_DST,
-            false,
-        )?;
-
-        self.update_from_buffer(
-            &image,
-            &buffer,
-            stride,
-            bpp,
-            &[Rectangle::new(Point::new(0, 0), size)],
-        )?;
-
-        Ok(image)
-    }
-
+    /// Updates regions of an image from shm memory.
+    ///
+    /// The memory is copied before returning, so it does not need to outlive the call.
     pub(super) fn update_from_shm(
         &mut self,
         data: *const u8,
@@ -282,37 +170,8 @@ impl VulkanRenderer {
         image: &VulkanImage,
         regions: &[Rectangle<i32, BufferCoords>],
     ) -> Result<(), Error> {
-        let format = image.format();
-        let bpp = get_drm_format(format)
-            .and_then(get_bpp)
-            .ok_or(ImageError::UnsupportedFormat)?
-            / 8;
-
-        let buffer = match Buffer::from_ptr(
-            &self.device,
-            unsafe { std::mem::transmute(data) },
-            len,
-            ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT,
-            BufferUsageFlags::TRANSFER_SRC,
-        ) {
-            Ok(buf) => buf,
-            Err(err) => {
-                debug!("EXT_External_memory_host error: {:?}", err);
-                let buffer = Buffer::new(&self.device, len, None, BufferUsageFlags::TRANSFER_SRC, true)?;
-                let dst = buffer.mapped_ptr().unwrap();
-                for region in regions {
-                    let offset = (stride * region.loc.y as usize + region.loc.x as usize * bpp) as isize;
-                    let len = stride * region.size.h as usize - region.loc.x as usize * bpp;
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(data.offset(offset), dst.as_ptr() as *mut _, len);
-                    }
-                }
-                buffer
-            }
-        };
-
-        self.update_from_buffer(image, &buffer, stride, bpp, regions)?;
-
-        Ok(())
+        // SAFETY: The caller guarantees `data` points to `len` readable bytes.
+        let data = unsafe { std::slice::from_raw_parts(data, len) };
+        self.update_from_slice(data, stride, image, regions)
     }
 }

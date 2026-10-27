@@ -70,12 +70,14 @@ use std::{
     sync::LazyLock,
 };
 
-use ash::{vk, Entry};
+use ash::{Entry, vk};
 use libc::c_void;
 use tracing::{error, info, trace, warn};
 
+/// A Vulkan logical device.
 pub mod device;
 pub mod format;
+/// Vulkan images and image errors.
 pub mod image;
 pub mod instance;
 pub mod phd;
@@ -121,8 +123,7 @@ fn get_env_or_max_version(max_version: Version) -> Version {
                 if overridden_version > max_version {
                     warn!(
                         "Ignoring SMITHAY_VK_VERSION since the requested max version is higher than the maximum of {}.{}",
-                        max_version.major,
-                        max_version.minor
+                        max_version.major, max_version.minor
                     );
                     max_version
                 } else {

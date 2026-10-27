@@ -483,7 +483,12 @@ fn usage_flags_from_string(flags: &str) -> Result<ImageUsageFlags, String> {
         .split('+')
         .map(|f| {
             Ok(match f.to_lowercase().trim() {
-                "all" => ImageUsageFlags::all(),
+                "all" => {
+                    ImageUsageFlags::COLOR_ATTACHMENT
+                        | ImageUsageFlags::SAMPLED
+                        | ImageUsageFlags::TRANSFER_SRC
+                        | ImageUsageFlags::TRANSFER_DST
+                }
                 "empty" | "none" => ImageUsageFlags::empty(),
                 "color_attachment" => ImageUsageFlags::COLOR_ATTACHMENT,
                 "sampled" => ImageUsageFlags::SAMPLED,
