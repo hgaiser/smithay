@@ -359,18 +359,25 @@ impl VulkanImage {
         }
 
         let mut mem_bits = None;
-        for (i, types) in device
-            .memory_properties()
-            .memory_types_as_slice()
-            .iter()
-            .enumerate()
-        {
-            if memory_type_bits & (1 << i) != 0
-                && types.property_flags.contains(MemoryPropertyFlags::DEVICE_LOCAL)
-            {
-                alloc_create_info = alloc_create_info.memory_type_index(i as u32);
-                mem_bits = Some(types.property_flags.clone());
+        // Prefer device local memory. An imported DMA-BUF that lives in system memory
+        // can only be imported as a type that is not device local.
+        for require_local in [true, false] {
+            if mem_bits.is_some() || (!require_local && dmabuf.is_none()) {
                 break;
+            }
+            for (i, types) in device
+                .memory_properties()
+                .memory_types_as_slice()
+                .iter()
+                .enumerate()
+            {
+                if memory_type_bits & (1 << i) != 0
+                    && (!require_local || types.property_flags.contains(MemoryPropertyFlags::DEVICE_LOCAL))
+                {
+                    alloc_create_info = alloc_create_info.memory_type_index(i as u32);
+                    mem_bits = Some(types.property_flags.clone());
+                    break;
+                }
             }
         }
 
