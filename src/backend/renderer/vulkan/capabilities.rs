@@ -102,7 +102,7 @@ impl Features {
     /// Returns the name of the first missing feature as the error.
     pub fn has_required_features(&self) -> Result<(), &'static str> {
         // TODO: I'd love to have a more generic `satisfies(&self, other: &Self)` method,
-        // but there isn't a nice way to iterate over fields of a struct and do the necessary bool comparision.
+        // but there isn't a nice way to iterate over fields of a struct and do the necessary bool comparison.
         // And I am not at the point yet of thinking to write a vulkan generator, na-uh!
 
         if self.features_12.timeline_semaphore == 0 {

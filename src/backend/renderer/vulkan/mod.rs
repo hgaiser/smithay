@@ -171,7 +171,7 @@ pub enum Error {
     #[error("Failed to submit command buffer")]
     /// Submitting a command buffer failed.
     SubmitError(#[source] VkResult),
-    #[error("Error intefacing with the underlying drm device")]
+    #[error("Error interfacing with the underlying drm device")]
     /// Interfacing with the underlying DRM device failed.
     DrmError(#[source] std::io::Error),
     #[error("Underlying Vulkan Device was destroyed")]

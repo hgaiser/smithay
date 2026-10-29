@@ -127,7 +127,7 @@ impl DrmTimeline {
 }
 
 impl WeakDrmTimeline {
-    /// Tries to recieve a strong reference to the underlying timeline
+    /// Tries to receive a strong reference to the underlying timeline
     pub fn upgrade(&self) -> Option<DrmTimeline> {
         self.0.upgrade().map(DrmTimeline)
     }
