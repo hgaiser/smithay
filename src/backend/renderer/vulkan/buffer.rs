@@ -165,6 +165,25 @@ impl Buffer {
         usage: BufferUsageFlags,
         mappable: bool,
     ) -> Result<Buffer, Error> {
+        Self::new_inner(device, size, mem_mask, usage, mappable, false)
+    }
+
+    /// Creates a host-mapped buffer that the CPU reads back from.
+    ///
+    /// Prefers cached host memory. Uncached memory (write-combined system memory, or the
+    /// PCIe BAR) is fast to write but very slow to read.
+    pub fn new_readback(device: &Device, size: usize, usage: BufferUsageFlags) -> Result<Buffer, Error> {
+        Self::new_inner(device, size, None, usage, true, true)
+    }
+
+    fn new_inner(
+        device: &Device,
+        size: usize,
+        mem_mask: Option<u32>,
+        usage: BufferUsageFlags,
+        mappable: bool,
+        cached: bool,
+    ) -> Result<Buffer, Error> {
         let create_info = BufferCreateInfo::default()
             .usage(usage)
             .size(size as u64)
@@ -179,23 +198,37 @@ impl Buffer {
         let mem_req = unsafe { device.vk().get_buffer_memory_requirements(buffer.clone()) };
         let mem_mask = mem_mask.unwrap_or(u32::MAX) & mem_req.memory_type_bits;
         let (device_local, mem_idx) = if mappable {
-            mem_idx(
-                device.memory_properties(),
-                mem_mask,
-                MemoryPropertyFlags::DEVICE_LOCAL
-                    | MemoryPropertyFlags::HOST_VISIBLE
-                    | MemoryPropertyFlags::HOST_COHERENT,
-            )
-            .map(|idx| (true, idx))
-            .or_else(|| {
-                mem_idx(
-                    device.memory_properties(),
-                    mem_mask,
-                    MemoryPropertyFlags::HOST_VISIBLE | MemoryPropertyFlags::HOST_COHERENT,
-                )
-                .map(|idx| (false, idx))
-            })
-            .ok_or(Error::NoMatchingMemoryType)?
+            cached
+                .then(|| {
+                    mem_idx(
+                        device.memory_properties(),
+                        mem_mask,
+                        MemoryPropertyFlags::HOST_VISIBLE
+                            | MemoryPropertyFlags::HOST_COHERENT
+                            | MemoryPropertyFlags::HOST_CACHED,
+                    )
+                    .map(|idx| (false, idx))
+                })
+                .flatten()
+                .or_else(|| {
+                    mem_idx(
+                        device.memory_properties(),
+                        mem_mask,
+                        MemoryPropertyFlags::DEVICE_LOCAL
+                            | MemoryPropertyFlags::HOST_VISIBLE
+                            | MemoryPropertyFlags::HOST_COHERENT,
+                    )
+                    .map(|idx| (true, idx))
+                })
+                .or_else(|| {
+                    mem_idx(
+                        device.memory_properties(),
+                        mem_mask,
+                        MemoryPropertyFlags::HOST_VISIBLE | MemoryPropertyFlags::HOST_COHERENT,
+                    )
+                    .map(|idx| (false, idx))
+                })
+                .ok_or(Error::NoMatchingMemoryType)?
         } else {
             mem_idx(
                 device.memory_properties(),

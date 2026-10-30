@@ -841,7 +841,7 @@ impl VulkanRenderer {
             * region.size.w as usize;
         let len = stride * region.size.h as usize;
 
-        let buffer = Buffer::new(&self.device, len, None, BufferUsageFlags::TRANSFER_DST, true)?;
+        let buffer = Buffer::new_readback(&self.device, len, BufferUsageFlags::TRANSFER_DST)?;
 
         let mut recording = self.begin_recording()?;
         recording.skip_foreign_fences();
