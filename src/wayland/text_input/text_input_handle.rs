@@ -10,7 +10,7 @@ use wayland_server::{Resource, protocol::wl_surface::WlSurface};
 
 use crate::input::SeatHandler;
 use crate::utils::{Logical, Rectangle};
-use crate::wayland::{Dispatch2, input_method::InputMethodHandle};
+use crate::wayland::{Dispatch2, input_method::InputMethodHandle, text_input::TextInputActivation};
 
 #[derive(Default, Debug)]
 pub(crate) struct TextInput {
@@ -217,6 +217,7 @@ pub struct TextInputUserData {
 impl<D> Dispatch2<ZwpTextInputV3, D> for TextInputUserData
 where
     D: SeatHandler,
+    D: TextInputActivation,
     D: 'static,
 {
     fn request(
@@ -287,7 +288,8 @@ where
                 pending_state.content_type = Some((hint, purpose));
             }
             zwp_text_input_v3::Request::SetCursorRectangle { x, y, width, height } => {
-                pending_state.cursor_rectangle = Some(Rectangle::new((x, y).into(), (width, height).into()));
+                pending_state.cursor_rectangle =
+                    (width > 0 && height > 0).then(|| Rectangle::new((x, y).into(), (width, height).into()));
             }
             zwp_text_input_v3::Request::Commit => {
                 let mut new_state = mem::take(pending_state);
@@ -305,12 +307,14 @@ where
                         // Drop the guard before calling to other subsystem.
                         drop(guard);
                         self.input_method_handle.activate_input_method(state, &focus);
+                        state.activated(new_state.content_type);
                     }
                     Some(false) => {
                         *active_text_input_id = None;
                         // Drop the guard before calling to other subsystem.
                         drop(guard);
                         self.input_method_handle.deactivate_input_method(state);
+                        state.deactivated();
                         return;
                     }
                     None => {
@@ -380,6 +384,7 @@ where
 
         if deactivate_im {
             self.input_method_handle.deactivate_input_method(state);
+            state.deactivated();
         }
     }
 }

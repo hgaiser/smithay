@@ -92,7 +92,7 @@ use smithay::{
         single_pixel_buffer::SinglePixelBufferState,
         socket::ListeningSocketSource,
         tablet_manager::TabletManagerState,
-        text_input::TextInputManagerState,
+        text_input::{TextInputActivation, TextInputManagerState},
         viewporter::ViewporterState,
         virtual_keyboard::VirtualKeyboardManagerState,
         xdg_activation::{
@@ -258,10 +258,10 @@ impl<BackendData: Backend> SelectionHandler for AnvilState<BackendData> {
 
     #[cfg(feature = "xwayland")]
     fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, _seat: Seat<Self>) {
-        if let Some(xwm) = self.xwm.as_mut() {
-            if let Err(err) = xwm.new_selection(ty, source.map(|source| source.mime_types())) {
-                warn!(?err, ?ty, "Failed to set Xwayland selection");
-            }
+        if let Some(xwm) = self.xwm.as_mut()
+            && let Err(err) = xwm.new_selection(ty, source.map(|source| source.mime_types()))
+        {
+            warn!(?err, ?ty, "Failed to set Xwayland selection");
         }
     }
 
@@ -274,10 +274,10 @@ impl<BackendData: Backend> SelectionHandler for AnvilState<BackendData> {
         _seat: Seat<Self>,
         _user_data: &(),
     ) {
-        if let Some(xwm) = self.xwm.as_mut() {
-            if let Err(err) = xwm.send_selection(ty, mime_type, fd) {
-                warn!(?err, "Failed to send primary (X11 -> Wayland)");
-            }
+        if let Some(xwm) = self.xwm.as_mut()
+            && let Err(err) = xwm.send_selection(ty, mime_type, fd)
+        {
+            warn!(?err, "Failed to send primary (X11 -> Wayland)");
         }
     }
 }
@@ -438,6 +438,8 @@ impl<BackendData: Backend> PointerConstraintsHandler for AnvilState<BackendData>
     }
 }
 
+impl<BackendData: Backend> TextInputActivation for AnvilState<BackendData> {}
+
 impl<BackendData: Backend> XdgActivationHandler for AnvilState<BackendData> {
     fn activation_state(&mut self) -> &mut XdgActivationState {
         &mut self.xdg_activation_state
@@ -506,6 +508,16 @@ impl<BackendData: Backend> XdgDecorationHandler for AnvilState<BackendData> {
 
         if toplevel.is_initial_configure_sent() {
             toplevel.send_pending_configure();
+        }
+    }
+    fn decoration_destroyed(&mut self, toplevel: ToplevelSurface) {
+        if let Some(window) = self
+            .space
+            .elements()
+            .find(|window| window.wl_surface().as_deref() == Some(toplevel.wl_surface()))
+        {
+            // The client forcefully goes back to CSD
+            window.set_ssd(false);
         }
     }
 }

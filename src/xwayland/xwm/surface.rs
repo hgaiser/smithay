@@ -883,7 +883,7 @@ impl X11Surface {
     /// Note that XWayland will only set this if it was unable to bind the
     /// [xwayland shell](crate::wayland::xwayland_shell) protocol on the wayland
     /// side.
-    #[deprecated = "Since XWayland 23.1, the recommended approach is to use [wl_surface_serial] and the [xwayland shell](crate::wayland::xwayland_shell) protocol on the wayland side to match X11 windows."]
+    #[deprecated = "Since XWayland 23.1, the recommended approach is to use [wl_surface_serial](X11Surface::wl_surface_serial) and the [xwayland shell](crate::wayland::xwayland_shell) protocol on the wayland side to match X11 windows."]
     pub fn wl_surface_id(&self) -> Option<u32> {
         self.state.lock().unwrap().wl_surface_id
     }
@@ -2516,7 +2516,9 @@ fn fetch_opaque_regions(
 
                 values
                     .collect::<Vec<_>>()
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .flat_map(|rect_values| {
                         let phys_rect = Rectangle::<i32, Physical>::new(
                             (rect_values[0] as i32, rect_values[1] as i32).into(),

@@ -9,13 +9,18 @@ use smithay::{backend::renderer::DebugFlags, input::tablet};
 
 use smithay::{
     backend::input::{
-        self, Axis, AxisSource, Device, DeviceCapability, Event, InputBackend, InputEvent, InputTime,
+        self, Axis, AxisSource, Device, DeviceCapability, Event, GestureBeginEvent, GestureEndEvent,
+        GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _, InputBackend, InputEvent, InputTime,
         KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, TouchEvent,
     },
     desktop::{WindowSurfaceType, layer_map_for_output},
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState, keysyms as xkb},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
+        pointer::{
+            GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent,
+            GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
+        },
         tablet::{TabletDescriptor, TabletSeatTrait},
         touch::{DownEvent, UpEvent},
     },
@@ -29,6 +34,7 @@ use smithay::{
         input_method::InputMethodSeat,
         keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat,
         shell::wlr_layer::{KeyboardInteractivity, Layer as WlrLayer},
+        virtual_keyboard::{VirtualKeyboardBackend, VirtualKeyboardHandler, VirtualKeyboardSpecialEvent},
     },
 };
 
@@ -36,24 +42,19 @@ use smithay::backend::input::AbsolutePositionEvent;
 
 #[cfg(any(feature = "winit", feature = "x11"))]
 use smithay::output::Output;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::state::Backend;
 #[cfg(feature = "udev")]
 use smithay::{
     backend::{
         input::{
-            GestureBeginEvent, GestureEndEvent, GesturePinchUpdateEvent as _, GestureSwipeUpdateEvent as _,
             PointerMotionEvent, ProximityState, TabletToolButtonEvent, TabletToolEvent,
             TabletToolProximityEvent, TabletToolTipEvent, TabletToolTipState,
         },
         session::Session,
     },
-    input::pointer::{
-        GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent,
-        GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
-        RelativeMotionEvent,
-    },
+    input::pointer::RelativeMotionEvent,
     reexports::wayland_server::DisplayHandle,
     wayland::{
         pointer_constraints::{PointerConstraint, with_pointer_constraint},
@@ -239,6 +240,108 @@ impl<BackendData: Backend> AnvilState<BackendData> {
         pointer.frame(self);
     }
 
+    fn on_gesture_swipe_begin<B: InputBackend>(&mut self, evt: B::GestureSwipeBeginEvent) {
+        let serial = SCOUNTER.next_serial();
+        let pointer = self.pointer.clone();
+        pointer.gesture_swipe_begin(
+            self,
+            &GestureSwipeBeginEvent {
+                serial,
+                time: evt.time(),
+                fingers: evt.fingers(),
+            },
+        );
+    }
+
+    fn on_gesture_swipe_update<B: InputBackend>(&mut self, evt: B::GestureSwipeUpdateEvent) {
+        let pointer = self.pointer.clone();
+        pointer.gesture_swipe_update(
+            self,
+            &GestureSwipeUpdateEvent {
+                time: evt.time(),
+                delta: evt.delta(),
+            },
+        );
+    }
+
+    fn on_gesture_swipe_end<B: InputBackend>(&mut self, evt: B::GestureSwipeEndEvent) {
+        let serial = SCOUNTER.next_serial();
+        let pointer = self.pointer.clone();
+        pointer.gesture_swipe_end(
+            self,
+            &GestureSwipeEndEvent {
+                serial,
+                time: evt.time(),
+                cancelled: evt.cancelled(),
+            },
+        );
+    }
+
+    fn on_gesture_pinch_begin<B: InputBackend>(&mut self, evt: B::GesturePinchBeginEvent) {
+        let serial = SCOUNTER.next_serial();
+        let pointer = self.pointer.clone();
+        pointer.gesture_pinch_begin(
+            self,
+            &GesturePinchBeginEvent {
+                serial,
+                time: evt.time(),
+                fingers: evt.fingers(),
+            },
+        );
+    }
+
+    fn on_gesture_pinch_update<B: InputBackend>(&mut self, evt: B::GesturePinchUpdateEvent) {
+        let pointer = self.pointer.clone();
+        pointer.gesture_pinch_update(
+            self,
+            &GesturePinchUpdateEvent {
+                time: evt.time(),
+                delta: evt.delta(),
+                scale: evt.scale(),
+                rotation: evt.rotation(),
+            },
+        );
+    }
+
+    fn on_gesture_pinch_end<B: InputBackend>(&mut self, evt: B::GesturePinchEndEvent) {
+        let serial = SCOUNTER.next_serial();
+        let pointer = self.pointer.clone();
+        pointer.gesture_pinch_end(
+            self,
+            &GesturePinchEndEvent {
+                serial,
+                time: evt.time(),
+                cancelled: evt.cancelled(),
+            },
+        );
+    }
+
+    fn on_gesture_hold_begin<B: InputBackend>(&mut self, evt: B::GestureHoldBeginEvent) {
+        let serial = SCOUNTER.next_serial();
+        let pointer = self.pointer.clone();
+        pointer.gesture_hold_begin(
+            self,
+            &GestureHoldBeginEvent {
+                serial,
+                time: evt.time(),
+                fingers: evt.fingers(),
+            },
+        );
+    }
+
+    fn on_gesture_hold_end<B: InputBackend>(&mut self, evt: B::GestureHoldEndEvent) {
+        let serial = SCOUNTER.next_serial();
+        let pointer = self.pointer.clone();
+        pointer.gesture_hold_end(
+            self,
+            &GestureHoldEndEvent {
+                serial,
+                time: evt.time(),
+                cancelled: evt.cancelled(),
+            },
+        );
+    }
+
     fn update_keyboard_focus(&mut self, location: Point<f64, Logical>, serial: Serial) {
         let keyboard = self.seat.get_keyboard().unwrap();
         let touch = self.seat.get_touch();
@@ -263,35 +366,31 @@ impl<BackendData: Backend> AnvilState<BackendData> {
                     .user_data()
                     .get::<FullscreenSurface>()
                     .and_then(|f| f.get())
-                {
-                    if let Some((_, _)) =
+                    && let Some((_, _)) =
                         window.surface_under(location - output_geo.loc.to_f64(), WindowSurfaceType::ALL)
-                    {
-                        #[cfg(feature = "xwayland")]
-                        if let Some(surface) = window.0.x11_surface() {
-                            self.xwm.as_mut().unwrap().raise_window(surface).unwrap();
-                        }
-                        keyboard.set_focus(self, Some(window.into()), serial);
-                        return;
+                {
+                    #[cfg(feature = "xwayland")]
+                    if let Some(surface) = window.0.x11_surface() {
+                        self.xwm.as_mut().unwrap().raise_window(surface).unwrap();
                     }
+                    keyboard.set_focus(self, Some(window.into()), serial);
+                    return;
                 }
 
                 let layers = layer_map_for_output(output);
                 if let Some(layer) = layers
                     .layer_under(WlrLayer::Overlay, location - output_geo.loc.to_f64())
                     .or_else(|| layers.layer_under(WlrLayer::Top, location - output_geo.loc.to_f64()))
+                    && layer.can_receive_keyboard_focus()
+                    && let Some((_, _)) = layer.surface_under(
+                        location
+                            - output_geo.loc.to_f64()
+                            - layers.layer_geometry(layer).unwrap().loc.to_f64(),
+                        WindowSurfaceType::ALL,
+                    )
                 {
-                    if layer.can_receive_keyboard_focus() {
-                        if let Some((_, _)) = layer.surface_under(
-                            location
-                                - output_geo.loc.to_f64()
-                                - layers.layer_geometry(layer).unwrap().loc.to_f64(),
-                            WindowSurfaceType::ALL,
-                        ) {
-                            keyboard.set_focus(self, Some(layer.clone().into()), serial);
-                            return;
-                        }
-                    }
+                    keyboard.set_focus(self, Some(layer.clone().into()), serial);
+                    return;
                 }
             }
 
@@ -311,17 +410,15 @@ impl<BackendData: Backend> AnvilState<BackendData> {
                 if let Some(layer) = layers
                     .layer_under(WlrLayer::Bottom, location - output_geo.loc.to_f64())
                     .or_else(|| layers.layer_under(WlrLayer::Background, location - output_geo.loc.to_f64()))
+                    && layer.can_receive_keyboard_focus()
+                    && let Some((_, _)) = layer.surface_under(
+                        location
+                            - output_geo.loc.to_f64()
+                            - layers.layer_geometry(layer).unwrap().loc.to_f64(),
+                        WindowSurfaceType::ALL,
+                    )
                 {
-                    if layer.can_receive_keyboard_focus() {
-                        if let Some((_, _)) = layer.surface_under(
-                            location
-                                - output_geo.loc.to_f64()
-                                - layers.layer_geometry(layer).unwrap().loc.to_f64(),
-                            WindowSurfaceType::ALL,
-                        ) {
-                            keyboard.set_focus(self, Some(layer.clone().into()), serial);
-                        }
-                    }
+                    keyboard.set_focus(self, Some(layer.clone().into()), serial);
                 }
             };
         }
@@ -643,6 +740,16 @@ impl<BackendData: Backend> AnvilState<BackendData> {
             }
             InputEvent::PointerButton { event } => self.on_pointer_button::<B>(event),
             InputEvent::PointerAxis { event } => self.on_pointer_axis::<B>(event),
+
+            InputEvent::GestureSwipeBegin { event, .. } => self.on_gesture_swipe_begin::<B>(event),
+            InputEvent::GestureSwipeUpdate { event, .. } => self.on_gesture_swipe_update::<B>(event),
+            InputEvent::GestureSwipeEnd { event, .. } => self.on_gesture_swipe_end::<B>(event),
+            InputEvent::GesturePinchBegin { event, .. } => self.on_gesture_pinch_begin::<B>(event),
+            InputEvent::GesturePinchUpdate { event, .. } => self.on_gesture_pinch_update::<B>(event),
+            InputEvent::GesturePinchEnd { event, .. } => self.on_gesture_pinch_end::<B>(event),
+            InputEvent::GestureHoldBegin { event, .. } => self.on_gesture_hold_begin::<B>(event),
+            InputEvent::GestureHoldEnd { event, .. } => self.on_gesture_hold_end::<B>(event),
+
             InputEvent::TouchDown { event } => self.on_touch_down::<B>(event),
             InputEvent::TouchUp { event } => self.on_touch_up::<B>(event),
             InputEvent::TouchMotion { event } => self.on_touch_motion::<B>(event),
@@ -937,23 +1044,20 @@ impl AnvilState<UdevData> {
         let mut delta = self.clamp_coords(pointer_location + evt.delta()) - pointer_location;
 
         // Clamp the individual x and y components of delta to respect confinement regions
-        if pointer_confined {
-            if let Some((_, surface_loc)) = &under {
-                if let Some(region) = &confine_region {
-                    // Clamp delta.x
-                    if !region.contains(
-                        (pointer_location + Point::new(delta.x, 0f64) - *surface_loc).to_i32_round(),
-                    ) {
-                        delta.x = 0f64;
-                    }
+        if pointer_confined
+            && let Some((_, surface_loc)) = &under
+            && let Some(region) = &confine_region
+        {
+            // Clamp delta.x
+            if !region.contains((pointer_location + Point::new(delta.x, 0f64) - *surface_loc).to_i32_round())
+            {
+                delta.x = 0f64;
+            }
 
-                    // Clamp delta.y
-                    if !region.contains(
-                        (pointer_location + Point::new(0f64, delta.y) - *surface_loc).to_i32_round(),
-                    ) {
-                        delta.y = 0f64;
-                    }
-                }
+            // Clamp delta.y
+            if !region.contains((pointer_location + Point::new(0f64, delta.y) - *surface_loc).to_i32_round())
+            {
+                delta.y = 0f64;
             }
         }
 
@@ -962,13 +1066,12 @@ impl AnvilState<UdevData> {
         let new_under = self.surface_under(pointer_location);
 
         // If confined, don't move pointer if it would go outside surface
-        if pointer_confined {
-            if let Some((surface, _)) = &under {
-                if new_under.as_ref().and_then(|(under, _)| under.wl_surface()) != surface.wl_surface() {
-                    pointer.frame(self);
-                    return;
-                }
-            }
+        if pointer_confined
+            && let Some((surface, _)) = &under
+            && new_under.as_ref().and_then(|(under, _)| under.wl_surface()) != surface.wl_surface()
+        {
+            pointer.frame(self);
+            return;
         }
 
         pointer.motion(
@@ -1214,108 +1317,6 @@ impl AnvilState<UdevData> {
         }
     }
 
-    fn on_gesture_swipe_begin<B: InputBackend>(&mut self, evt: B::GestureSwipeBeginEvent) {
-        let serial = SCOUNTER.next_serial();
-        let pointer = self.pointer.clone();
-        pointer.gesture_swipe_begin(
-            self,
-            &GestureSwipeBeginEvent {
-                serial,
-                time: evt.time(),
-                fingers: evt.fingers(),
-            },
-        );
-    }
-
-    fn on_gesture_swipe_update<B: InputBackend>(&mut self, evt: B::GestureSwipeUpdateEvent) {
-        let pointer = self.pointer.clone();
-        pointer.gesture_swipe_update(
-            self,
-            &GestureSwipeUpdateEvent {
-                time: evt.time(),
-                delta: evt.delta(),
-            },
-        );
-    }
-
-    fn on_gesture_swipe_end<B: InputBackend>(&mut self, evt: B::GestureSwipeEndEvent) {
-        let serial = SCOUNTER.next_serial();
-        let pointer = self.pointer.clone();
-        pointer.gesture_swipe_end(
-            self,
-            &GestureSwipeEndEvent {
-                serial,
-                time: evt.time(),
-                cancelled: evt.cancelled(),
-            },
-        );
-    }
-
-    fn on_gesture_pinch_begin<B: InputBackend>(&mut self, evt: B::GesturePinchBeginEvent) {
-        let serial = SCOUNTER.next_serial();
-        let pointer = self.pointer.clone();
-        pointer.gesture_pinch_begin(
-            self,
-            &GesturePinchBeginEvent {
-                serial,
-                time: evt.time(),
-                fingers: evt.fingers(),
-            },
-        );
-    }
-
-    fn on_gesture_pinch_update<B: InputBackend>(&mut self, evt: B::GesturePinchUpdateEvent) {
-        let pointer = self.pointer.clone();
-        pointer.gesture_pinch_update(
-            self,
-            &GesturePinchUpdateEvent {
-                time: evt.time(),
-                delta: evt.delta(),
-                scale: evt.scale(),
-                rotation: evt.rotation(),
-            },
-        );
-    }
-
-    fn on_gesture_pinch_end<B: InputBackend>(&mut self, evt: B::GesturePinchEndEvent) {
-        let serial = SCOUNTER.next_serial();
-        let pointer = self.pointer.clone();
-        pointer.gesture_pinch_end(
-            self,
-            &GesturePinchEndEvent {
-                serial,
-                time: evt.time(),
-                cancelled: evt.cancelled(),
-            },
-        );
-    }
-
-    fn on_gesture_hold_begin<B: InputBackend>(&mut self, evt: B::GestureHoldBeginEvent) {
-        let serial = SCOUNTER.next_serial();
-        let pointer = self.pointer.clone();
-        pointer.gesture_hold_begin(
-            self,
-            &GestureHoldBeginEvent {
-                serial,
-                time: evt.time(),
-                fingers: evt.fingers(),
-            },
-        );
-    }
-
-    fn on_gesture_hold_end<B: InputBackend>(&mut self, evt: B::GestureHoldEndEvent) {
-        let serial = SCOUNTER.next_serial();
-        let pointer = self.pointer.clone();
-        pointer.gesture_hold_end(
-            self,
-            &GestureHoldEndEvent {
-                serial,
-                time: evt.time(),
-                cancelled: evt.cancelled(),
-            },
-        );
-    }
-
     fn clamp_coords(&self, pos: Point<f64, Logical>) -> Point<f64, Logical> {
         if self.space.outputs().next().is_none() {
             return pos;
@@ -1397,5 +1398,50 @@ fn process_keyboard_shortcut(modifiers: ModifiersState, keysym: Keysym) -> Optio
         Some(KeyAction::ToggleDecorations)
     } else {
         None
+    }
+}
+
+impl<BackendData: Backend> VirtualKeyboardHandler for AnvilState<BackendData> {
+    fn process_virtual_keyboard_event(&mut self, event: InputEvent<VirtualKeyboardBackend>) {
+        let keyboard = self.seat.get_keyboard().unwrap();
+
+        match event {
+            // The device's keycodes only mean anything under its own keymap, so
+            // activate it before processing events. Anvil never switches back;
+            // a real compositor should track which device the seat keymap came
+            // from and restore its configured one when a physical key arrives.
+            InputEvent::DeviceAdded { device }
+            | InputEvent::Special(VirtualKeyboardSpecialEvent::KeymapChanged { device }) => {
+                let Some(keymap) = device.keymap() else {
+                    return;
+                };
+                if let Err(err) = keyboard.set_keymap_from_keymap_file(self, keymap) {
+                    warn!(?err, "Failed to apply virtual keyboard keymap");
+                }
+            }
+            InputEvent::Keyboard { event } => {
+                match self.keyboard_key_to_action::<VirtualKeyboardBackend>(event) {
+                    action @ (KeyAction::None
+                    | KeyAction::Quit
+                    | KeyAction::Run(_)
+                    | KeyAction::TogglePreview
+                    | KeyAction::ToggleDecorations) => self.process_common_key_action(action),
+                    // VT switching and output changes are out-of-scope for virtual keyboards.
+                    action => debug!(?action, "ignoring key action from a virtual keyboard"),
+                }
+            }
+            InputEvent::Special(VirtualKeyboardSpecialEvent::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            }) => {
+                keyboard.with_xkb_state(self, |mut context| {
+                    context.set_modifier_mask(mods_depressed, mods_latched, mods_locked, group)
+                });
+            }
+            _ => (),
+        }
     }
 }

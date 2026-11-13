@@ -20,6 +20,10 @@ use smithay::{
     utils::{DeviceFd, Point, Rectangle, Size, Transform},
 };
 
+#[allow(
+    clippy::disallowed_macros,
+    reason = "the extension and device lists are this example's output"
+)]
 fn main() {
     let path = "./test.png";
     if let Ok(env_filter) = tracing_subscriber::EnvFilter::try_from_default_env() {
