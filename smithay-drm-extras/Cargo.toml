@@ -14,4 +14,5 @@ default = ["display-info"]
 display-info = ["libdisplay-info"]
 
 [dev-dependencies.smithay]
+package = "ferriscope-smithay"
 path = "../"

@@ -8,6 +8,7 @@ tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
 bitflags = "2.2.1"
 
 [dependencies.smithay]
+package = "ferriscope-smithay"
 path = "../"
 default-features = false
 features = [

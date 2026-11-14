@@ -22,6 +22,7 @@ puffin_http = { version = "0.13", optional = true }
 profiling = { version = "1.0" }
 
 [dependencies.smithay]
+package = "ferriscope-smithay"
 default-features = false
 features = ["desktop", "wayland_frontend"]
 path = ".."
