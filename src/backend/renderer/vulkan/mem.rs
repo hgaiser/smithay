@@ -158,20 +158,4 @@ impl VulkanRenderer {
 
         Ok(())
     }
-
-    /// Updates regions of an image from shm memory.
-    ///
-    /// The memory is copied before returning, so it does not need to outlive the call.
-    pub(super) fn update_from_shm(
-        &mut self,
-        data: *const u8,
-        len: usize,
-        stride: usize,
-        image: &VulkanImage,
-        regions: &[Rectangle<i32, BufferCoords>],
-    ) -> Result<(), Error> {
-        // SAFETY: The caller guarantees `data` points to `len` readable bytes.
-        let data = unsafe { std::slice::from_raw_parts(data, len) };
-        self.update_from_slice(data, stride, image, regions)
-    }
 }
