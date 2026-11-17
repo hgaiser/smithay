@@ -1,6 +1,6 @@
 [package]
 name = "ferriscope-smithay"
-version = "0.7.2+a9822e8"
+version = "0.7.3+dc1d71f"
 authors = ["Victor Berger <victor.berger@m4x.org>", "Drakulix (Victoria Brekenfeld)"]
 license = "MIT"
 description = "Fork of smithay with a Vulkan compute renderer, for ferriscope"
