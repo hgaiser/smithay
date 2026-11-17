@@ -660,14 +660,10 @@ impl ImportMemWl for VulkanRenderer {
         });
 
         with_buffer_contents(buffer, |ptr, len, data| {
-            let offset = data.offset;
             let width = data.width;
             let height = data.height;
-            let stride = data.stride;
             let fourcc = shm_format_to_fourcc(data.format).ok_or(ImageError::UnsupportedFormat)?;
-            let bpp = get_bpp(fourcc).ok_or(ImageError::UnsupportedFormat)? / 8;
             let format = get_vk_format(fourcc).ok_or(ImageError::UnsupportedFormat)?;
-            assert!((offset + (height - 1) * stride + width * bpp as i32) as usize <= len);
 
             let mut upload_full = false;
             let id = self.context_id();
@@ -701,11 +697,39 @@ impl ImportMemWl for VulkanRenderer {
                 damage
             };
 
-            self.update_from_shm(ptr, len, stride as usize, &image, regions)?;
+            // SAFETY: `with_buffer_contents` hands out the whole pool: `len` readable bytes at `ptr`.
+            let pool = unsafe { std::slice::from_raw_parts(ptr, len) };
+            self.upload_shm(pool, &data, &image, regions)?;
 
             Ok(image)
         })
         .map_err(Error::BufferAccessError)?
+    }
+}
+
+impl VulkanRenderer {
+    /// Upload `regions` of the shm buffer described by `data` into `image`.
+    ///
+    /// `pool` is the buffer's whole pool. The buffer starts `data.offset` bytes into it: a client
+    /// can keep several buffers in one pool, as `wayland-cursor` does with a cursor theme.
+    fn upload_shm(
+        &mut self,
+        pool: &[u8],
+        data: &crate::wayland::shm::BufferData,
+        image: &VulkanImage,
+        regions: &[Rectangle<i32, BufferCoords>],
+    ) -> Result<(), Error> {
+        let fourcc =
+            crate::wayland::shm::shm_format_to_fourcc(data.format).ok_or(ImageError::UnsupportedFormat)?;
+        let bpp = get_bpp(fourcc).ok_or(ImageError::UnsupportedFormat)? / 8;
+        let (offset, width, height, stride) = (
+            data.offset as usize,
+            data.width as usize,
+            data.height as usize,
+            data.stride as usize,
+        );
+        assert!(offset + (height - 1) * stride + width * bpp <= pool.len());
+        self.update_from_slice(&pool[offset..], stride, image, regions)
     }
 }
 
@@ -1582,5 +1606,69 @@ impl<'frame, 'buffer> BlitFrame<VulkanFramebuffer> for VulkanFrame<'frame, 'buff
             sync_file: None,
         }
         .into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::vulkan::{Instance, PhysicalDevice, Version};
+    use crate::wayland::shm::BufferData;
+    use wayland_server::protocol::wl_shm;
+
+    /// A buffer that starts partway into its pool, as the images of a `wayland-cursor` theme do,
+    /// is read from its own bytes, not from the start of the pool.
+    #[test]
+    #[ignore = "needs a Vulkan device"]
+    fn shm_buffers_start_at_their_offset() {
+        let instance = Instance::new(Version::VERSION_1_3, None).expect("Vulkan instance");
+        let phd = PhysicalDevice::enumerate(&instance)
+            .expect("physical devices")
+            .next()
+            .expect("a Vulkan device");
+        let mut renderer = VulkanRenderer::new(&phd, None).expect("renderer");
+
+        // A 4x2 ARGB8888 buffer with padded rows, 36 bytes into a pool whose other bytes are 0xEE.
+        let (width, height, stride, offset) = (4usize, 2usize, 20usize, 36usize);
+        let mut pool = vec![0xEE; offset + height * stride + 8];
+        let mut expected = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = [x as u8, y as u8, 0xAB, 0xFF];
+                let at = offset + y * stride + x * 4;
+                pool[at..at + 4].copy_from_slice(&pixel);
+                expected.extend_from_slice(&pixel);
+            }
+        }
+        let data = BufferData {
+            offset: offset as i32,
+            width: width as i32,
+            height: height as i32,
+            stride: stride as i32,
+            format: wl_shm::Format::Argb8888,
+        };
+
+        let image = VulkanImage::new(
+            &renderer.device,
+            width as u32,
+            height as u32,
+            get_vk_format(Fourcc::Argb8888).expect("ARGB8888 is supported"),
+            true,
+            vk::ImageUsageFlags::TRANSFER_DST
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::SAMPLED,
+            false,
+        )
+        .expect("image");
+        let size = Size::<i32, BufferCoords>::new(width as i32, height as i32);
+        renderer
+            .upload_shm(&pool, &data, &image, &[Rectangle::from_size(size)])
+            .expect("upload");
+
+        let mapping = renderer
+            .copy_texture(&image, Rectangle::from_size(size), Fourcc::Argb8888)
+            .expect("copy back");
+        let pixels = renderer.map_texture(&mapping).expect("map").to_vec();
+        assert_eq!(pixels, expected);
     }
 }
